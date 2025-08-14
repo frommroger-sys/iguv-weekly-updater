@@ -1,47 +1,69 @@
 name: IGUV Weekly Website Updater
 
 on:
+  # ▶ Ermöglicht den "Run workflow"-Button in GitHub → Actions
+  workflow_dispatch: {}
+  # ⏰ Wöchentlich: Donnerstag 06:00 Uhr Europe/Zurich (entspricht 04:00 UTC)
   schedule:
-    # Jeden Donnerstag um 06:00 Uhr Zürich-Zeit
-    - cron: "0 4 * * 4"  # UTC = 06:00 Europe/Zurich
-  workflow_dispatch: # manueller Start möglich
+    - cron: "0 4 * * 4"
 
 jobs:
   update:
     runs-on: ubuntu-latest
 
+    env:
+      TZ: Europe/Zurich
+      # Modell für die Zusammenfassung (Scrape ➜ KI-Summary). Passt zu deinem aktuellen updater.py.
+      OPENAI_MODEL: gpt-4o-mini
+      # WordPress Container-ID; falls du sie als Secret pflegst, ersetzt die nächste Zeile durch: ${{ secrets.WP_CONTAINER_ID }}
+      WP_CONTAINER_ID: weekly-update-content
+
+      # Secrets (unter Repo → Settings → Secrets and variables → Actions)
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      WP_BASE: ${{ secrets.WP_BASE }}
+      WP_PAGE_ID: ${{ secrets.WP_PAGE_ID }}
+      WP_USERNAME: ${{ secrets.WP_USERNAME }}
+      WP_APP_PASSWORD: ${{ secrets.WP_APP_PASSWORD }}
+
     steps:
-    - name: Checkout Repo
-      uses: actions/checkout@v4
+      - name: Checkout Repo
+        uses: actions/checkout@v4
 
-    - name: Setup Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.11'
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
+      - name: Quick sanity check (Keys/ENV)
+        run: |
+          echo "Model: ${OPENAI_MODEL}"
+          if [ -z "${OPENAI_API_KEY}" ]; then
+            echo "❌ OPENAI_API_KEY fehlt. Bitte als Repository Secret setzen."
+            exit 1
+          fi
+          if [ -z "${WP_BASE}" ] || [ -z "${WP_PAGE_ID}" ] || [ -z "${WP_USERNAME}" ] || [ -z "${WP_APP_PASSWORD}" ]; then
+            echo "❌ WP_* ENV unvollständig. Bitte Secrets prüfen."
+            exit 1
+          fi
+          echo "✅ ENV ok"
 
-    - name: Run updater.py
-env:
-  OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-  OPENAI_MODEL: gpt-4o-mini
-  WP_BASE: ${{ secrets.WP_BASE }}
-  WP_PAGE_ID: ${{ secrets.WP_PAGE_ID }}
-  WP_USERNAME: ${{ secrets.WP_USERNAME }}
-  WP_APP_PASSWORD: ${{ secrets.WP_APP_PASSWORD }}
-  WP_CONTAINER_ID: weekly-update-content
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-      run: |
-        echo "Starte Weekly Update ..."
-        python updater.py
+      - name: Run updater
+        run: |
+          echo "Starte Weekly Update ..."
+          python updater.py
 
-    - name: Debug Logs (bei Fehlern)
-      if: failure()
-      run: |
-        echo "=== Verzeichnisinhalt ==="
-        ls -la
-        echo "=== Letzte 200 Zeilen Log ==="
-        tail -n 200 /home/runner/work/_temp/_runner_file_commands/* || true
+      # Zeigt bei Fehlern hilfreiche Runner-Infos
+      - name: Dump diagnostics (on failure)
+        if: failure()
+        run: |
+          echo "=== Python version ==="
+          python --version
+          echo "=== PWD ==="
+          pwd
+          echo "=== Files ==="
+          ls -la
