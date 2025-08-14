@@ -131,5 +131,6 @@ def fetch_so_fit():
 
 # ======= MAIN =======
 if __name__ == "__main__":
-    # Hier kommt dein bisheriger main()-Code rein
-    main()
+    # Hier direkt der bisherige Code
+    print("Updater startet...")
+    # fetch data, update WordPress, etc.
