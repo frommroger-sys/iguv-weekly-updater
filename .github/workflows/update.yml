@@ -25,14 +25,15 @@ jobs:
         pip install -r requirements.txt
 
     - name: Run updater.py
-      env:
-        OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-        OPENAI_MODEL: gpt-4o-mini-search-preview
-        WP_BASE: ${{ secrets.WP_BASE }}
-        WP_PAGE_ID: ${{ secrets.WP_PAGE_ID }}
-        WP_USERNAME: ${{ secrets.WP_USERNAME }}
-        WP_APP_PASSWORD: ${{ secrets.WP_APP_PASSWORD }}
-        WP_CONTAINER_ID: weekly-update-content
+env:
+  OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+  OPENAI_MODEL: gpt-4o-mini
+  WP_BASE: ${{ secrets.WP_BASE }}
+  WP_PAGE_ID: ${{ secrets.WP_PAGE_ID }}
+  WP_USERNAME: ${{ secrets.WP_USERNAME }}
+  WP_APP_PASSWORD: ${{ secrets.WP_APP_PASSWORD }}
+  WP_CONTAINER_ID: weekly-update-content
+
       run: |
         echo "Starte Weekly Update ..."
         python updater.py
