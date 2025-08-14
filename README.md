@@ -1,6 +1,6 @@
-# IGUV / INPASU Weekly Updater
+# IGUV Weekly Updates
 
-Zweck: Wöchentliche, KI-gestützte Zusammenfassung (letzte X Tage) aus definierten Quellen, gefiltert nach Keywords. HTML wird in einen definierten Container auf einer WordPress-Seite geschrieben.
+Zweck: Wöchentliche, KI-gestützte Zusammenfassung (letzte X Tage) aus definierten Quellen, gefiltert nach relevanten Keywords. HTML wird in einen definierten Container auf einer WordPress-Seite geschrieben.
 
 ## Dateien
 - `updater.py` — Hauptskript (KI + Rendering + WP-Update)
