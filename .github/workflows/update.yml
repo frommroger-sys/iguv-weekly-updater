@@ -1,14 +1,14 @@
-name: IGUV Weekly Website Updater (Safe Mode + Rebuild Container)
+name: IGUV Weekly Website Updater
 
 on:
   workflow_dispatch:
     inputs:
       fast:
-        description: "FAST-Modus (nur Kernquellen; schneller, weniger Last)"
+        description: "FAST mode (core sources only)"
         required: false
         default: "true"
   schedule:
-    # Donnerstag 06:00 Europe/Zurich = 04:00 UTC
+    # Thursday 06:00 Europe/Zurich = 04:00 UTC
     - cron: "0 4 * * 4"
 
 jobs:
@@ -18,7 +18,7 @@ jobs:
     env:
       TZ: Europe/Zurich
 
-      # Modell & Limits (passen zum updater.py)
+      # Model & safe-mode limits
       OPENAI_MODEL: gpt-4o-mini
       HTTP_TIMEOUT_S: "25"
       HTTP_MAX_RETRIES: "2"
@@ -27,13 +27,11 @@ jobs:
       MAX_ITEMS_PER_SECTION_KI: "5"
       OPENAI_REQUEST_TIMEOUT_S: "60"
 
-      # --- WICHTIG: Container-Strategie ---
-      # 'rebuild' = ALLE vorhandenen Container/Marker entfernen und EINEN frischen Block einsetzen.
-      # 'replace' = nur Inhalt innerhalb vorhandener ID/Marker ersetzen (fallback).
+      # Container handling
       CONTAINER_STRATEGY: rebuild
       WP_CONTAINER_ID: weekly-update-content
 
-      # Secrets (Repo → Settings → Secrets and variables → Actions)
+      # Secrets
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       WP_BASE: ${{ secrets.WP_BASE }}
       WP_PAGE_ID: ${{ secrets.WP_PAGE_ID }}
@@ -41,7 +39,7 @@ jobs:
       WP_APP_PASSWORD: ${{ secrets.WP_APP_PASSWORD }}
 
     steps:
-      - name: Checkout Repo
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Setup Python
@@ -49,42 +47,32 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Quick sanity check (Keys/ENV)
+      - name: Sanity check
         run: |
-          echo "Model: ${OPENAI_MODEL}"
-          if [ -z "${OPENAI_API_KEY}" ]; then
-            echo "❌ OPENAI_API_KEY fehlt. Bitte als Repository Secret setzen."
-            exit 1
-          fi
+          echo "Model=$OPENAI_MODEL"
+          [ -n "$OPENAI_API_KEY" ] || { echo "OPENAI_API_KEY missing"; exit 1; }
           for v in WP_BASE WP_PAGE_ID WP_USERNAME WP_APP_PASSWORD; do
-            if [ -z "$(eval echo \$$v)" ]; then
-              echo "❌ $v fehlt. Bitte als Repository Secret setzen."
-              exit 1
-            fi
+            eval val=\$$v
+            [ -n "$val" ] || { echo "$v missing"; exit 1; }
           done
-          echo "✅ ENV ok"
+          echo "ENV OK"
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run updater (FAST optional)
+      - name: Run updater
         run: |
-          echo "Starte Weekly Update ..."
+          echo "Start Weekly Update..."
           if [ "${{ github.event.inputs.fast }}" = "true" ]; then
-            echo "FAST-Modus aktiv."
             python updater.py --fast
           else
             python updater.py
           fi
 
-      - name: Dump diagnostics (on failure)
+      - name: Diagnostics on failure
         if: failure()
         run: |
-          echo "=== Python version ==="
           python --version
-          echo "=== Working dir ==="
-          pwd
-          echo "=== Files ==="
           ls -la
