@@ -1,34 +1,48 @@
-name: IGUV Weekly Website Updater
+name: Weekly Website Update
 
 on:
+  # Manuell starten in GitHub → Actions → "Run workflow"
+  workflow_dispatch: {}
+  # Wöchentlich: Donnerstag 06:00 Europe/Zurich = 04:00 UTC (DST beachten)
   schedule:
-    # Donnerstag 06:00 Europe/Zurich
-    - cron: '0 6 * * 4'
-  workflow_dispatch: {}   # erlaubt "Run workflow" jetzt sofort
+    - cron: "0 4 * * 4"
 
 jobs:
-  run:
+  run-updater:
+    # Falls du Environment-Secrets nutzt, hier aktivieren:
+    # environment: production
     runs-on: ubuntu-latest
     env:
       TZ: Europe/Zurich
+      # Nimmt zuerst Secret, sonst Variable (Fallback)
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY || vars.OPENAI_API_KEY }}
+      OPENAI_MODEL: gpt-4.1
       WP_BASE: ${{ secrets.WP_BASE }}
       WP_PAGE_ID: ${{ secrets.WP_PAGE_ID }}
       WP_USERNAME: ${{ secrets.WP_USERNAME }}
       WP_APP_PASSWORD: ${{ secrets.WP_APP_PASSWORD }}
       WP_CONTAINER_ID: ${{ secrets.WP_CONTAINER_ID }}
-      USER_AGENT: IGUV-Weekly-Updater/2.0 (+https://iguv.ch)
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
+
+      - name: Debug OpenAI key presence
+        run: |
+          if [ -z "${OPENAI_API_KEY}" ]; then
+            echo "OPENAI_API_KEY is EMPTY – bitte im Repo unter Settings → Secrets and variables → Actions anlegen."
+            exit 1
+          else
+            echo "OPENAI_API_KEY is present."
+          fi
 
       - name: Install deps
         run: pip install -r requirements.txt
 
       - name: Run updater
-        run: |
-          python updater.py
+        run: python updater.py
