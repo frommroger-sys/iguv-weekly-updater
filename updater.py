@@ -1,15 +1,15 @@
-import os, sys, json, re, datetime, traceback
-from dateutil.tz import gettz
+import os, sys, re, json, datetime, traceback
+from urllib.parse import urljoin, urlparse
 from dateutil.relativedelta import relativedelta
-from dateutil.parser import isoparse
+from dateutil.tz import gettz
 import yaml
 import requests
 from bs4 import BeautifulSoup
 from openai import OpenAI
 
-# ====== ENV (per GitHub Secrets gesetzt) ======
+# ========= ENV (aus GitHub Secrets) =========
 OPENAI_API_KEY   = os.environ.get("OPENAI_API_KEY", "")
-MODEL            = os.environ.get("OPENAI_MODEL", "gpt-4.1")  # Empfehlung
+MODEL            = os.environ.get("OPENAI_MODEL", "gpt-4.1")
 WP_BASE          = os.environ.get("WP_BASE", "").rstrip("/")
 WP_PAGE_ID       = os.environ.get("WP_PAGE_ID", "")
 WP_USERNAME      = os.environ.get("WP_USERNAME", "")
@@ -17,228 +17,190 @@ WP_APP_PASSWORD  = os.environ.get("WP_APP_PASSWORD", "")
 WP_CONTAINER_ID  = os.environ.get("WP_CONTAINER_ID", "weekly-update-content")
 TZ               = os.environ.get("TZ", "Europe/Zurich")
 
-def log_env_sanity():
-    print("ENV-Sanity:")
-    print(" - OPENAI_API_KEY set?:", bool(OPENAI_API_KEY))
-    print(" - MODEL:", MODEL)
-    print(" - WP_BASE:", bool(WP_BASE))
-    print(" - WP_PAGE_ID:", bool(WP_PAGE_ID))
-    print(" - WP_USERNAME:", bool(WP_USERNAME))
-    print(" - WP_APP_PASSWORD set?:", bool(WP_APP_PASSWORD))
-    print(" - WP_CONTAINER_ID:", WP_CONTAINER_ID)
-
-def require_env():
-    missing = []
-    if not OPENAI_API_KEY: missing.append("OPENAI_API_KEY")
-    if not WP_BASE: missing.append("WP_BASE")
-    if not WP_PAGE_ID: missing.append("WP_PAGE_ID")
-    if not WP_USERNAME: missing.append("WP_USERNAME")
-    if not WP_APP_PASSWORD: missing.append("WP_APP_PASSWORD")
-    if missing:
-        raise RuntimeError("Fehlende ENV Variablen: " + ", ".join(missing))
+# ========= Utilities =========
+def iso_now_local() -> str:
+    return datetime.datetime.now(tz=gettz(TZ)).strftime("%Y-%m-%d %H:%M")
 
 def load_yaml(path: str) -> dict:
     with open(path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
-def iso_now_local() -> str:
-    tz = gettz(TZ)
-    return datetime.datetime.now(tz=tz).strftime("%Y-%m-%d %H:%M")
+def domain(url: str) -> str:
+    return urlparse(url).netloc
 
-def build_json_schema():
-    return {
-        "name": "WeeklyDigest",
-        "schema": {
-            "type": "object",
-            "properties": {
-                "sections": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "name": {"type": "string"},
-                            "items": {
-                                "type": "array",
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "title": {"type": "string"},
-                                        "url": {"type": "string"},
-                                        "date_iso": {"type": "string"},
-                                        "summary": {"type": "string"},
-                                        "tags": {"type": "array", "items": {"type": "string"}}
-                                    },
-                                    "required": ["title", "url", "date_iso", "summary"]
-                                }
-                            }
-                        },
-                        "required": ["name", "items"]
-                    }
-                }
-            },
-            "required": ["sections"],
-            "additionalProperties": False
-        }
+def get(url: str, timeout: int = 30) -> requests.Response:
+    headers = {"User-Agent": "IGUV-Weekly-Updater/2.0 (+https://iguv.ch)"}
+    return requests.get(url, headers=headers, timeout=timeout)
+
+# Gängige Datums-Muster in Link-Texten/URLs (YYYY-MM-DD, DD.MM.YYYY, /2025/08/ usw.)
+DATE_PATTERNS = [
+    r"(?P<iso>\d{4}-\d{2}-\d{2})",
+    r"(?P<dot>\d{2}\.\d{2}\.\d{4})",
+    r"/(?P<ym>\d{4})/(?P<m>\d{2})/",
+]
+
+def parse_date_heuristic(text_or_url: str):
+    text = text_or_url
+    for pat in DATE_PATTERNS:
+        m = re.search(pat, text)
+        if not m:
+            continue
+        if "iso" in m.groupdict() and m.group("iso"):
+            try:
+                return datetime.datetime.strptime(m.group("iso"), "%Y-%m-%d").date()
+            except Exception:
+                pass
+        if "dot" in m.groupdict() and m.group("dot"):
+            try:
+                return datetime.datetime.strptime(m.group("dot"), "%d.%m.%Y").date()
+            except Exception:
+                pass
+        if "ym" in m.groupdict() and "m" in m.groupdict():
+            try:
+                y = int(m.group("ym")); mo = int(m.group("m"))
+                # fallback: Tag = 1
+                return datetime.date(y, mo, 1)
+            except Exception:
+                pass
+    return None
+
+def is_within_days(d: datetime.date, days: int) -> bool:
+    if not d: return False
+    today = datetime.date.today()
+    return (today - d) <= datetime.timedelta(days=days)
+
+def same_site(href: str, base: str) -> bool:
+    try:
+        return domain(href) == domain(base)
+    except Exception:
+        return False
+
+def extract_candidates(list_url: str, days: int, keywords: list[str]) -> list[dict]:
+    """Holt eine Übersichtsseite, sammelt Links, filtert grob nach Keywords & Datum."""
+    print(f" - Quelle abrufen: {list_url}")
+    try:
+        resp = get(list_url, timeout=40)
+    except Exception as e:
+        print("   WARN: fetch failed:", repr(e))
+        return []
+    if resp.status_code != 200:
+        print("   WARN: HTTP", resp.status_code, "bei", list_url)
+        return []
+
+    soup = BeautifulSoup(resp.text, "lxml")
+    items = []
+    base = list_url
+    kws = [k.lower() for k in keywords]
+
+    for a in soup.find_all("a", href=True):
+        href = urljoin(base, a["href"])
+        text = " ".join(a.get_text(separator=" ", strip=True).split())
+        if not text:
+            continue
+        # nur Links der gleichen Domain priorisieren (reduziert Rauschen)
+        if not same_site(href, base):
+            continue
+        blob = (text + " " + href).lower()
+        if kws and not any(k in blob for k in kws):
+            continue
+
+        d = parse_date_heuristic(text) or parse_date_heuristic(href)
+        if d and not is_within_days(d, days):
+            continue
+
+        items.append({
+            "title": text[:200],
+            "url": href,
+            "date": d.isoformat() if d else None,
+            "source": domain(href)
+        })
+
+    # Duplikate raus
+    dedup = {}
+    for it in items:
+        dedup[(it["title"], it["url"])] = it
+    items = list(dedup.values())
+
+    print(f"   -> {len(items)} Kandidaten nach Filter")
+    return items
+
+def summarize_with_openai(sections_payload: list[dict], max_per_section: int, style: str) -> dict:
+    """Nimmt bereits gescrapte Kandidaten, lässt KI eine elegante Kurzfassung bauen (JSON)."""
+    client = OpenAI(api_key=OPENAI_API_KEY)
+
+    sys_prompt = (
+        "Du bist ein präziser Nachrichten-Editor für Finanz-/Regulierungsthemen in der Schweiz. "
+        "Du bekommst pro Sektion eine Liste von Kandidaten mit Titel/URL/Datum/Quelle. "
+        f"Erstelle pro Sektion maximal {max_per_section} prägnante Punkte. "
+        "Jeder Punkt: title, url, date_iso (falls None: heutigen Tag verwenden), summary (1–2 Sätze, warum es relevant ist). "
+        "Gib das Ergebnis als JSON-Objekt mit {\"sections\":[{\"name\":\"...\",\"items\":[...]}]} zurück."
+    )
+
+    user_payload = {
+        "style": style,
+        "now_local": iso_now_local(),
+        "sections": sections_payload
     }
 
-def render_html(template_path: str, content_html: str, days: int) -> str:
-    with open(template_path, "r", encoding="utf-8") as f:
-        tpl = f.read()
-    return (tpl
-            .replace("{{WP_CONTAINER_ID}}", WP_CONTAINER_ID)
-            .replace("{{TIMESTAMP}}", iso_now_local())
-            .replace("{{CONTENT}}", content_html)
-            .replace("{{DAYS}}", str(days)))
+    completion = client.chat.completions.create(
+        model=MODEL,
+        response_format={"type": "json_object"},
+        messages=[
+            {"role": "system", "content": sys_prompt},
+            {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)}
+        ],
+        temperature: 0.2
+    )
+    txt = completion.choices[0].message.content
+    try:
+        data = json.loads(txt)
+    except Exception:
+        print("WARN: KI-Output war kein JSON. Rohtext (Anfang):", (txt or "")[:600])
+        # Fallback: leere Struktur
+        data = {"sections": []}
+    return data
 
-def to_html_list(digest: dict) -> str:
-    out = []
+def to_html(digest: dict, days: int) -> str:
+    parts = [f'<h2>Wöchentliche Übersicht (aktualisiert: {iso_now_local()})</h2>']
     for sec in digest.get("sections", []):
-        if not sec.get("items"):
-            continue
-        out.append(f'<h3 style="margin-top:1.2em;">{sec["name"]}</h3>')
-        out.append("<ul>")
-        for it in sec["items"]:
+        items = sec.get("items", []) or []
+        if not items: continue
+        parts.append(f'<h3 style="margin-top:1.2em;">{sec.get("name","")}</h3>')
+        parts.append("<ul>")
+        for it in items:
             date = (it.get("date_iso") or "")[:10]
-            title = (it.get("title") or "").strip()
-            url = (it.get("url") or "").strip()
-            summary = (it.get("summary") or "").strip()
-            out.append(f'<li><strong>{date}</strong> – <a href="{url}" target="_blank" rel="noopener">{title}</a>: {summary}</li>')
-        out.append("</ul>")
-    if not out:
-        return "<p>Keine relevanten Neuigkeiten in den letzten Tagen.</p>"
-    return "\n".join(out)
+            title = it.get("title","").strip()
+            url = it.get("url","").strip()
+            summary = it.get("summary","").strip()
+            parts.append(f'<li><strong>{date}</strong> – <a href="{url}" target="_blank" rel="noopener">{title}</a>: {summary}</li>')
+        parts.append("</ul>")
+    if len(parts) == 1:
+        parts.append("<p>Keine relevanten Neuigkeiten in den letzten Tagen.</p>")
+    parts.append(f'<hr><p style="font-size:12px;color:#666;">Automatisch erstellt (letzte {days} Tage).</p>')
+    return "\n".join(parts)
 
 def fetch_wp_page():
     url = f"{WP_BASE}/wp-json/wp/v2/pages/{WP_PAGE_ID}?context=edit"
-    resp = requests.get(url, auth=(WP_USERNAME, WP_APP_PASSWORD), timeout=30)
-    if resp.status_code != 200:
-        raise RuntimeError(f"WP GET fehlgeschlagen: {resp.status_code} {resp.text}")
-    return resp.json()
+    r = requests.get(url, auth=(WP_USERNAME, WP_APP_PASSWORD), timeout=30)
+    if r.status_code != 200:
+        raise RuntimeError(f"WP GET fehlgeschlagen: {r.status_code} {r.text}")
+    return r.json()
 
-def replace_container_html(full_html: str, new_container_html: str) -> str:
+def replace_container_html(full_html: str, inner_html: str) -> str:
+    # Ersetzt den Inhalt innerhalb des Containers; falls Container fehlt, wird ein Block angehängt.
     pattern = re.compile(rf'(<div[^>]+id=["\']{re.escape(WP_CONTAINER_ID)}["\'][^>]*>)(.*?)(</div>)',
-                         re.DOTALL | re.IGNORECASE)
+                         re.IGNORECASE | re.DOTALL)
     if pattern.search(full_html):
-        return pattern.sub(rf'\1{new_container_html}\3', full_html)
+        return pattern.sub(rf'\1{inner_html}\3', full_html)
     else:
-        # Container fehlt -> vollständigen Block anhängen
-        block = f'<div id="{WP_CONTAINER_ID}">{new_container_html}</div>'
+        block = f'<div id="{WP_CONTAINER_ID}">{inner_html}</div>'
         return full_html + "\n" + block
 
-def update_wp_page(new_container_inner_html: str) -> dict:
+def update_wp(inner_html: str):
     page = fetch_wp_page()
     current_html = page.get("content", {}).get("raw") or page.get("content", {}).get("rendered", "")
-    updated_html = replace_container_html(current_html, new_container_inner_html)
+    new_html = replace_container_html(current_html, inner_html)
     url = f"{WP_BASE}/wp-json/wp/v2/pages/{WP_PAGE_ID}"
-    payload = {"content": updated_html}
-    resp = requests.post(url, auth=(WP_USERNAME, WP_APP_PASSWORD), json=payload, timeout=60)
-    if resp.status_code not in (200, 201):
-        raise RuntimeError(f"WP UPDATE fehlgeschlagen: {resp.status_code} {resp.text}")
-    return resp.json()
-
-def build_user_instruction(cfg: dict) -> str:
-    days = cfg.get("time_window_days", 7)
-    kw = ", ".join(cfg.get("keywords", [])) or "(keine)"
-    return "\n".join([
-        f"Erstelle eine wöchentliche Übersicht der letzten {days} Tage.",
-        f"Maximal {cfg.get('summary', {}).get('max_bullets_per_section', 5)} Punkte pro Sektion.",
-        "Filterregeln:",
-        f"- Nur Meldungen innerhalb der letzten {days} Tage.",
-        f"- Schlüsselwörter (mindestens eines): {kw}.",
-        "- Keine Duplikate.",
-        '- Jede Meldung: Titel, ISO-Datum, URL, 1–2 Sätze Kurzfazit ("warum relevant").',
-        f'Stil: {cfg.get("summary", {}).get("style", "Kompakt und sachlich.")}',
-    ])
-
-def query_openai_digest(cfg: dict) -> dict:
-    client = OpenAI(api_key=OPENAI_API_KEY)
-    days = cfg.get("time_window_days", 7)
-    cutoff_iso = (datetime.datetime.now(datetime.timezone.utc) - relativedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-    instruction = build_user_instruction(cfg)
-    json_schema = build_json_schema()
-
-    print(" - KI-Abfrage (Responses API) ...")
-    response = client.responses.create(
-        model=MODEL,
-        reasoning={"effort": "medium"},
-        tools=[{"type": "web_search"}],
-        response_format={"type": "json_schema", "json_schema": json_schema},
-        input=[{
-            "role": "user",
-            "content": [
-                {"type": "text", "text": instruction},
-                {"type": "input_text", "text": json.dumps({
-                    "cutoff_iso_utc": cutoff_iso,
-                    "sections": cfg.get("sections", []),
-                    "keywords": cfg.get("keywords", [])
-                }, ensure_ascii=False)}
-            ]
-        }]
-    )
-
-    raw = response.output_text
-    if not raw:
-        raise RuntimeError("Leere Antwort der KI (output_text ist leer).")
-    try:
-        data = json.loads(raw)
-    except Exception:
-        print("Rohantwort (erster Teil):", raw[:600], "...")
-        raise
-
-    # Failsafe-Filter nach Datum & Keywords
-    keywords = [k.lower() for k in cfg.get("keywords", [])]
-    cutoff = isoparse(cutoff_iso)
-    filtered_sections = []
-    for sec in data.get("sections", []):
-        items = []
-        for it in sec.get("items", []):
-            try:
-                d = isoparse(it.get("date_iso"))
-            except Exception:
-                continue
-            if d < cutoff:
-                continue
-            if keywords:
-                blob = " ".join([it.get("title",""), it.get("summary",""), " ".join(it.get("tags",[]))]).lower()
-                if not any(k in blob for k in keywords):
-                    continue
-            items.append(it)
-        if items:
-            filtered_sections.append({"name": sec["name"], "items": items})
-
-    return {"sections": filtered_sections}
-
-def main():
-    print("== IGUV/INPASU Weekly Updater startet ==")
-    log_env_sanity()
-    require_env()
-
-    print("Konfiguration laden ...")
-    cfg = load_yaml("data_sources.yaml")
-    print(" - Quellenblöcke:", len(cfg.get("sections", [])))
-
-    print("KI & Websuche ausführen ...")
-    digest = query_openai_digest(cfg)
-    total = sum(len(s.get("items", [])) for s in digest.get("sections", []))
-    print(" - Relevante Meldungen:", total)
-
-    print("HTML rendern ...")
-    content_html = to_html_list(digest)
-    full_html = render_html("html_template.html", content_html, cfg.get("time_window_days", 7))
-
-    print("WordPress aktualisieren ...")
-    updated = update_wp_page(full_html)
-    mod = updated.get("modified") or updated.get("modified_gmt")
-    link = updated.get("link") or updated.get("guid", {}).get("rendered")
-    print(f"SUCCESS: WP aktualisiert. modified={mod} link={link}")
-
-    print("== Fertig ==")
-
-if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        print("ERROR:", repr(e))
-        traceback.print_exc()
-        sys.exit(2)
+    r = requests.post(url, auth=(WP_USERNAME, WP_APP_PASSWORD), json={"content": new_html}, timeout=60)
+    if r.status_code not in (200, 201):
+        raise RuntimeError(f"WP UPDATE fehlgeschlagen: {r.stat
