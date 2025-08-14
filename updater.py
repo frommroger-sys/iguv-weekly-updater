@@ -1,4 +1,4 @@
-import os, sys, re, json, datetime, traceback
+import os, sys, re, json, datetime, traceback, argparse
 from urllib.parse import urljoin, urlparse
 from dateutil.tz import gettz
 import yaml
@@ -6,9 +6,9 @@ import requests
 from bs4 import BeautifulSoup
 from openai import OpenAI
 
-# ========= ENV Variablen =========
+# ======= ENV / Defaults =======
 OPENAI_API_KEY   = os.environ.get("OPENAI_API_KEY", "")
-MODEL            = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")  # schlank & günstig für Summaries
+MODEL            = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 WP_BASE          = os.environ.get("WP_BASE", "").rstrip("/")
 WP_PAGE_ID       = os.environ.get("WP_PAGE_ID", "")
 WP_USERNAME      = os.environ.get("WP_USERNAME", "")
@@ -16,8 +16,15 @@ WP_APP_PASSWORD  = os.environ.get("WP_APP_PASSWORD", "")
 WP_CONTAINER_ID  = os.environ.get("WP_CONTAINER_ID", "weekly-update-content")
 TZ               = os.environ.get("TZ", "Europe/Zurich")
 
-# ========= HTTP-Header/UA (verhindert 403/Caching-Probleme) =========
-USER_AGENT = "Mozilla/5.0 (compatible; IGUV-Weekly-Updater/2.0; +https://iguv.ch)"
+# Limits & Timeouts (Safe Defaults)
+HTTP_TIMEOUT_S             = int(os.environ.get("HTTP_TIMEOUT_S", "25"))
+HTTP_MAX_RETRIES           = int(os.environ.get("HTTP_MAX_RETRIES", "2"))
+MAX_LINKS_PER_SOURCE       = int(os.environ.get("MAX_LINKS_PER_SOURCE", "40"))
+MAX_TOTAL_CANDIDATES       = int(os.environ.get("MAX_TOTAL_CANDIDATES", "150"))
+MAX_ITEMS_PER_SECTION_KI   = int(os.environ.get("MAX_ITEMS_PER_SECTION_KI", "5"))
+OPENAI_REQUEST_TIMEOUT_S   = int(os.environ.get("OPENAI_REQUEST_TIMEOUT_S", "60"))
+
+USER_AGENT = "Mozilla/5.0 (compatible; IGUV-Weekly-Updater/2.1; +https://iguv.ch)"
 DEFAULT_HEADERS = {
     "User-Agent": USER_AGENT,
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -25,7 +32,7 @@ DEFAULT_HEADERS = {
     "Cache-Control": "no-cache",
 }
 
-# ========= Hilfsfunktionen =========
+# ======= Utils =======
 def iso_now_local() -> str:
     return datetime.datetime.now(tz=gettz(TZ)).strftime("%Y-%m-%d %H:%M")
 
@@ -35,20 +42,23 @@ def load_yaml(path: str) -> dict:
 
 def require_env():
     missing = []
-    if not OPENAI_API_KEY: missing.append("OPENAI_API_KEY")
-    if not WP_BASE: missing.append("WP_BASE")
-    if not WP_PAGE_ID: missing.append("WP_PAGE_ID")
-    if not WP_USERNAME: missing.append("WP_USERNAME")
-    if not WP_APP_PASSWORD: missing.append("WP_APP_PASSWORD")
+    for k, v in {
+        "OPENAI_API_KEY": OPENAI_API_KEY,
+        "WP_BASE": WP_BASE,
+        "WP_PAGE_ID": WP_PAGE_ID,
+        "WP_USERNAME": WP_USERNAME,
+        "WP_APP_PASSWORD": WP_APP_PASSWORD,
+    }.items():
+        if not v:
+            missing.append(k)
     if missing:
         raise RuntimeError("Fehlende ENV Variablen: " + ", ".join(missing))
 
-def http_get(url: str, timeout: int = 40) -> requests.Response:
-    # simple retry (3 Versuche)
+def http_get(url: str) -> requests.Response:
     last_err = None
-    for attempt in range(3):
+    for _ in range(HTTP_MAX_RETRIES):
         try:
-            return requests.get(url, headers=DEFAULT_HEADERS, timeout=timeout)
+            return requests.get(url, headers=DEFAULT_HEADERS, timeout=HTTP_TIMEOUT_S)
         except Exception as e:
             last_err = e
     raise last_err
@@ -59,7 +69,7 @@ def domain(url: str) -> str:
     except Exception:
         return ""
 
-# Gängige Datums-Muster (YYYY-MM-DD, DD.MM.YYYY, /YYYY/MM/)
+# Datumsheuristiken
 DATE_PATTERNS = [
     r"(?P<iso>\d{4}-\d{2}-\d{2})",
     r"(?P<dot>\d{2}\.\d{2}\.\d{4})",
@@ -72,17 +82,17 @@ def parse_date_heuristic(text_or_url: str):
         m = re.search(pat, s)
         if not m:
             continue
-        if "iso" in m.groupdict() and m.group("iso"):
+        if m.groupdict().get("iso"):
             try:
                 return datetime.datetime.strptime(m.group("iso"), "%Y-%m-%d").date()
             except Exception:
                 pass
-        if "dot" in m.groupdict() and m.group("dot"):
+        if m.groupdict().get("dot"):
             try:
                 return datetime.datetime.strptime(m.group("dot"), "%d.%m.%Y").date()
             except Exception:
                 pass
-        if "y" in m.groupdict() and "m" in m.groupdict():
+        if m.groupdict().get("y") and m.groupdict().get("m"):
             try:
                 y = int(m.group("y")); mo = int(m.group("m"))
                 return datetime.date(y, mo, 1)
@@ -102,7 +112,7 @@ def same_site(href: str, base: str) -> bool:
         return False
 
 def extract_candidates(list_url: str, days: int, keywords: list[str]) -> list[dict]:
-    """Holt eine Übersichtsseite, sammelt Links, filtert grob nach Keywords & Datum (Heuristik)."""
+    """Begrenzt die Anzahl gescannter Links pro Quelle, filtert nach Keywords/Datum."""
     print(f" - Quelle abrufen: {list_url}")
     try:
         resp = http_get(list_url)
@@ -118,13 +128,13 @@ def extract_candidates(list_url: str, days: int, keywords: list[str]) -> list[di
     base = list_url
     out = []
 
-    # Generischer Link-Scrape
-    for a in soup.find_all("a", href=True):
+    for i, a in enumerate(soup.find_all("a", href=True)):
+        if i >= MAX_LINKS_PER_SOURCE:
+            break
         href = urljoin(base, a["href"].strip())
         text = " ".join(a.get_text(separator=" ", strip=True).split())
         if not text:
             continue
-        # nur gleiche Domain (reduziert Rauschen)
         if not same_site(href, base):
             continue
 
@@ -148,25 +158,37 @@ def extract_candidates(list_url: str, days: int, keywords: list[str]) -> list[di
     for it in out:
         dedup[(it["title"], it["url"])] = it
     items = list(dedup.values())
-    print(f"   -> {len(items)} Kandidaten nach Filter")
+    print(f"   -> {len(items)} Kandidaten nach Filter (begrenzt auf {MAX_LINKS_PER_SOURCE} Links gescannt)")
     return items
 
 def summarize_with_openai(sections_payload: list[dict], max_per_section: int, style: str) -> dict:
-    """Nimmt bereits gescrapte Kandidaten, lässt KI eine kompakte JSON-Zusammenfassung bauen."""
-    client = OpenAI(api_key=OPENAI_API_KEY)
+    """Beschränkte, robuste Zusammenfassung im JSON-Mode."""
+    client = OpenAI(api_key=OPENAI_API_KEY, timeout=OPENAI_REQUEST_TIMEOUT_S)
+
+    # Payload hart deckeln
+    capped_sections = []
+    total = 0
+    for sec in sections_payload:
+        cand = sec.get("candidates", [])
+        # pro Sektion max 50 Kandidaten an die KI
+        cand = cand[:50]
+        capped_sections.append({"name": sec.get("name", "Sektion"), "candidates": cand})
+        total += len(cand)
+        if total >= MAX_TOTAL_CANDIDATES:
+            break
 
     sys_prompt = (
         "Du bist ein präziser Nachrichten-Editor für Finanz-/Regulierungsthemen in der Schweiz. "
         f"Erstelle pro Sektion maximal {max_per_section} Punkte. "
-        "Jeder Punkt enthält: title, url, date_iso (YYYY-MM-DD; falls None → heutiges Datum), "
+        "Jeder Punkt: title, url, date_iso (YYYY-MM-DD; wenn None → heutiges Datum), "
         "summary (1–2 Sätze; warum relevant). "
         "Gib das Ergebnis als JSON-Objekt {\"sections\":[{\"name\":\"...\",\"items\":[...]}]} zurück."
     )
 
     user_payload = {
         "generated_at": iso_now_local(),
-        "style": style,
-        "sections": sections_payload
+        "sections": capped_sections,
+        "note": f"KI sieht max. {MAX_TOTAL_CANDIDATES} Kandidaten insgesamt; pro Sektion max. 50."
     }
 
     completion = client.chat.completions.create(
@@ -207,22 +229,31 @@ def to_html(digest: dict, days: int) -> str:
     if not any_item:
         parts.append("<p>Keine relevanten Neuigkeiten in den letzten Tagen.</p>")
     parts.append(f'<hr><p style="font-size:12px;color:#666;">Automatisch erstellt (letzte {days} Tage).</p>')
-    # In WP-Container einbetten
     return f'<div id="{WP_CONTAINER_ID}">' + "\n".join(parts) + "</div>"
 
 def fetch_wp_page():
     url = f"{WP_BASE}/wp-json/wp/v2/pages/{WP_PAGE_ID}?context=edit"
-    r = requests.get(url, auth=(WP_USERNAME, WP_APP_PASSWORD), timeout=30, headers=DEFAULT_HEADERS)
+    r = requests.get(url, auth=(WP_USERNAME, WP_APP_PASSWORD), timeout=HTTP_TIMEOUT_S, headers=DEFAULT_HEADERS)
     if r.status_code != 200:
         raise RuntimeError(f"WP GET fehlgeschlagen: {r.status_code} {r.text}")
     return r.json()
 
 def replace_container_html(full_html: str, inner_html: str) -> str:
-    # Ersetzt den Inhalt innerhalb <div id="WP_CONTAINER_ID">...</div> oder hängt Block an
-    pattern = re.compile(rf'(<div[^>]+id=["\']{re.escape(WP_CONTAINER_ID)}["\'][^>]*>)(.*?)(</div>)',
-                         re.IGNORECASE | re.DOTALL)
-    if pattern.search(full_html):
-        return pattern.sub(rf'\1{inner_html}\3', full_html)
+    # Marker bevorzugt
+    start_marker = "<!-- IGUV_WEEKLY_START -->"
+    end_marker   = "<!-- IGUV_WEEKLY_END -->"
+    if start_marker in full_html and end_marker in full_html:
+        pattern = re.compile(re.escape(start_marker) + r".*?" + re.escape(end_marker), re.DOTALL)
+        replacement = start_marker + "\n" + inner_html + "\n" + end_marker
+        return pattern.sub(replacement, full_html)
+
+    # Fallback: Container-ID ersetzen/anhängen
+    pattern_div = re.compile(
+        rf'(<div[^>]+id=["\']{re.escape(WP_CONTAINER_ID)}["\'][^>]*>)(.*?)(</div>)',
+        re.IGNORECASE | re.DOTALL
+    )
+    if pattern_div.search(full_html):
+        return pattern_div.sub(rf'\1{inner_html}\3', full_html)
     else:
         block = f'<div id="{WP_CONTAINER_ID}">{inner_html}</div>'
         return full_html + "\n" + block
@@ -232,39 +263,73 @@ def update_wp(inner_html: str):
     current_html = page.get("content", {}).get("raw") or page.get("content", {}).get("rendered", "")
     new_html = replace_container_html(current_html, inner_html)
     url = f"{WP_BASE}/wp-json/wp/v2/pages/{WP_PAGE_ID}"
-    r = requests.post(url, auth=(WP_USERNAME, WP_APP_PASSWORD), json={"content": new_html},
-                      timeout=60, headers=DEFAULT_HEADERS)
+    r = requests.post(url, auth=(WP_USERNAME, WP_APP_PASSWORD),
+                      json={"content": new_html},
+                      timeout=HTTP_TIMEOUT_S,
+                      headers=DEFAULT_HEADERS)
     if r.status_code not in (200, 201):
         raise RuntimeError(f"WP UPDATE fehlgeschlagen: {r.status_code} {r.text}")
     return r.json()
 
-# ========= Main =========
 def main():
+    parser = argparse.ArgumentParser(description="IGUV Weekly Updater")
+    parser.add_argument("--fast", action="store_true", help="Nur Kernquellen verarbeiten (schneller, weniger Last).")
+    args = parser.parse_args()
+
     print("== IGUV/INPASU Weekly Updater startet ==")
     require_env()
-
     cfg = load_yaml("data_sources.yaml")
+
+    # FAST-Modus: nur wesentliche Quellen
+    if args.fast:
+        core_domains = {
+            "finma.ch", "seco.admin.ch", "ofac.treasury.gov"
+        }
+        filtered_sections = []
+        for sec in cfg.get("sections", []):
+            kept = []
+            for u in sec.get("sources", []):
+                try:
+                    if any(d in domain(u) for d in core_domains):
+                        kept.append(u)
+                except Exception:
+                    pass
+            if kept:
+                filtered_sections.append({"name": sec["name"], "sources": kept})
+        cfg = {**cfg, "sections": filtered_sections}
+        print(f"FAST-Modus aktiv: {len(filtered_sections)} Sektionen / Kernquellen.")
+
     days = int(cfg.get("time_window_days", 7))
     keywords = cfg.get("keywords", [])
     sections_cfg = cfg.get("sections", [])
-    max_bullets = int(cfg.get("summary", {}).get("max_bullets_per_section", 5))
     style = cfg.get("summary", {}).get("style", "Kompakt, sachlich.")
 
     print("Quellen scannen …")
     sections_payload = []
+    total_candidates = 0
     for block in sections_cfg:
         name = block.get("name", "Sektion")
         urls = block.get("sources", [])
         all_items = []
         for u in urls:
+            if total_candidates >= MAX_TOTAL_CANDIDATES:
+                break
             items = extract_candidates(u, days=days, keywords=keywords)
+            # cap global
+            room = MAX_TOTAL_CANDIDATES - total_candidates
+            if room <= 0:
+                break
+            items = items[:room]
+            total_candidates += len(items)
             all_items.extend(items)
         # jüngere zuerst
         all_items.sort(key=lambda it: it.get("date") or "", reverse=True)
         sections_payload.append({"name": name, "candidates": all_items})
 
+    print(f"Gesamt-Kandidaten (gekappt): {total_candidates} / Limit {MAX_TOTAL_CANDIDATES}")
+
     print("KI-Zusammenfassung …")
-    digest = summarize_with_openai(sections_payload, max_per_section=max_bullets, style=style)
+    digest = summarize_with_openai(sections_payload, max_per_section=MAX_ITEMS_PER_SECTION_KI, style=style)
     total_items = sum(len(s.get("items", [])) for s in digest.get("sections", []))
     print(f"Relevante Meldungen nach KI: {total_items}")
 
@@ -276,7 +341,6 @@ def main():
     link = updated.get("link") or updated.get("guid", {}).get("rendered", "")
     mod  = updated.get("modified") or updated.get("modified_gmt", "")
     print(f"SUCCESS: WP aktualisiert. modified={mod} link={link}")
-
     print("== Fertig ==")
 
 if __name__ == "__main__":
