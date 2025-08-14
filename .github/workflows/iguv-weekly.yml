@@ -4,7 +4,7 @@ on:
   schedule:
     # Donnerstag 06:00 Europe/Zurich
     - cron: '0 6 * * 4'
-  workflow_dispatch: {}  # erlaubt "Run workflow" jetzt sofort
+  workflow_dispatch: {}   # erlaubt "Run workflow" jetzt sofort
 
 jobs:
   run:
@@ -31,28 +31,4 @@ jobs:
 
       - name: Run updater
         run: |
-          python - <<'PY'
-          import os, re, sys
-          # Env -> Variablen im Script setzen, ohne Code zu ändern
-          for k in ("WP_BASE","WP_PAGE_ID","WP_USERNAME","WP_APP_PASSWORD","WP_CONTAINER_ID","USER_AGENT"):
-              if os.getenv(k) is None:
-                  print(f"Missing env {k}", file=sys.stderr); sys.exit(2)
-          # Lade den eigentlichen Updater aus updater.py als Text,
-          # überschreibe die Konstanten am Kopf dynamisch:
-          src = open("updater.py","r",encoding="utf-8").read()
-          for key in ("WP_BASE","WP_PAGE_ID","WP_USERNAME","WP_APP_PASSWORD","WP_CONTAINER_ID","USER_AGENT"):
-              pattern = rf'^{key}\s*=\s*.*$'
-              value = os.getenv(key)
-              if key=="WP_BASE": value = f'"{value}".rstrip("/")'
-              elif key=="WP_PAGE_ID": value = str(value)
-              else: value = f'"{value}"'
-              repl = f'{key} = {value}'
-              src = re.sub(pattern, repl, src, flags=re.M)
-          open("updater.runtime.py","w",encoding="utf-8").write(src)
-          # Ausführen:
-          import runpy
-          try:
-              runpy.run_path("updater.runtime.py", run_name="__main__")
-          except SystemExit as e:
-              raise
-          PY
+          python updater.py
