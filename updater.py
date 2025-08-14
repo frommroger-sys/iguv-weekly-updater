@@ -143,14 +143,14 @@ def summarize_with_openai(sections_payload: list[dict], max_per_section: int, st
     }
 
     completion = client.chat.completions.create(
-        model=MODEL,
-        response_format={"type": "json_object"},
-        messages=[
-            {"role": "system", "content": sys_prompt},
-            {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)}
-        ],
-        temperature: 0.2
-    )
+    model=MODEL,
+    response_format={"type": "json_object"},
+    messages=[
+        {"role": "system", "content": sys_prompt},
+        {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)}
+    ],
+    temperature: 0.2
+)
     txt = completion.choices[0].message.content
     try:
         data = json.loads(txt)
