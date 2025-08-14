@@ -1,4 +1,5 @@
 time_window_days: 7
+
 keywords:
   - Gebühr
   - Reglement
@@ -6,32 +7,37 @@ keywords:
   - Rundschreiben
   - Prüfung
   - Gebührenreglement
+  - Aufsicht
+  - Enforcement
+  - Pressemitteilung
+  - Medienmitteilung
+
 sections:
   - name: "FINMA"
     sources:
-      - "https://www.finma.ch/de/news/medienmitteilungen/"
+      - "https://www.finma.ch/de/news/"                      # statt /news/medienmitteilungen/
       - "https://www.finma.ch/de/dokumentation/rundschreiben/"
   - name: "Aufsichtsorganisationen (AO)"
     sources:
       - "https://www.aoos.ch"
       - "https://www.osfin.ch"
-      - "https://www.oad-fct.ch"
+      - "https://oad-fct.ch"                                  # ohne www (DNS-Problem vermeiden)
       - "https://www.osif.ch"
       - "https://www.so-fit.ch"
   - name: "Sanktionen / Embargos"
     sources:
       - "https://www.seco.admin.ch/seco/de/home/Aussenwirtschaftspolitik_Wirtschaftliche_Zusammenarbeit/Wirtschaftsbeziehungen/exportkontrollen-und-sanktionen/sanktionen-embargos.html"
       - "https://ofac.treasury.gov/recent-actions"
-      - "https://www.consilium.europa.eu/en/press/press-releases/"
+      - "https://www.consilium.europa.eu/en/press/press-releases/"   # 403 mit härteren Headern umgehen
   - name: "Branchenstimmung / Verbände"
     sources:
       - "https://www.economiesuisse.ch/de/medien"
       - "https://www.swissbanking.ch/de/medien"
-      - "https://www.vsv-asg.ch/de/medienmitteilungen"
+      - "https://www.vsv-asg.ch/de/aktuelles"                 # statt /medienmitteilungen
   - name: "IGUV Events (optional)"
     sources:
       - "https://iguv.ch/event"
+
 summary:
   max_bullets_per_section: 5
   style: "Kompakt, sachlich, anlegerrelevant, mit Datum (ISO), Quelle (Link) und 1–2 Sätzen pro Punkt."
-
