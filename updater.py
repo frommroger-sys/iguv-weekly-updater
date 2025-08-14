@@ -25,8 +25,12 @@ MAX_TOTAL_CANDIDATES       = int(os.environ.get("MAX_TOTAL_CANDIDATES", "150"))
 MAX_ITEMS_PER_SECTION_KI   = int(os.environ.get("MAX_ITEMS_PER_SECTION_KI", "5"))
 OPENAI_REQUEST_TIMEOUT_S   = int(os.environ.get("OPENAI_REQUEST_TIMEOUT_S", "60"))
 
-USER_AGENT = "Mozilla/5.0 (compatible; IGUV-Weekly-Updater/2.2; +https://iguv.ch)"
+USER_AGENT = "Mozilla/5.0 (compatible; IGUV-Weekly-Updater/2.3; +https://iguv.ch)"
 DEFAULT_HEADERS = {
+    "User-Agent": USER_AGENT,
+    "Accept": "application/json, text/plain, */*",
+}
+DEFAULT_HTML_HEADERS = {
     "User-Agent": USER_AGENT,
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "de-CH,de;q=0.9,en;q=0.8",
@@ -55,11 +59,11 @@ def require_env():
     if missing:
         raise RuntimeError("Fehlende ENV Variablen: " + ", ".join(missing))
 
-def http_get(url: str) -> requests.Response:
+def http_get_html(url: str) -> requests.Response:
     last_err = None
     for _ in range(HTTP_MAX_RETRIES):
         try:
-            return requests.get(url, headers=DEFAULT_HEADERS, timeout=HTTP_TIMEOUT_S)
+            return requests.get(url, headers=DEFAULT_HTML_HEADERS, timeout=HTTP_TIMEOUT_S)
         except Exception as e:
             last_err = e
     raise last_err
@@ -113,10 +117,9 @@ def same_site(href: str, base: str) -> bool:
         return False
 
 def extract_candidates(list_url: str, days: int, keywords: list[str]) -> list[dict]:
-    """Begrenzt die Anzahl gescannter Links pro Quelle, filtert nach Keywords/Datum."""
     print(f" - Quelle abrufen: {list_url}")
     try:
-        resp = http_get(list_url)
+        resp = http_get_html(list_url)
     except Exception as e:
         print("   WARN: fetch failed:", repr(e))
         return []
@@ -163,10 +166,9 @@ def extract_candidates(list_url: str, days: int, keywords: list[str]) -> list[di
     return items
 
 def summarize_with_openai(sections_payload: list[dict], max_per_section: int, style: str) -> dict:
-    """Beschränkte, robuste Zusammenfassung im JSON-Mode."""
     client = OpenAI(api_key=OPENAI_API_KEY, timeout=OPENAI_REQUEST_TIMEOUT_S)
 
-    # Payload kappten
+    # Payload kappen
     capped_sections = []
     total = 0
     for sec in sections_payload:
@@ -231,78 +233,97 @@ def to_html(digest: dict, days: int) -> str:
     return "\n".join(parts)
 
 # -------- WordPress I/O --------
-def fetch_wp_page():
+def wp_get_page():
     url = f"{WP_BASE}/wp-json/wp/v2/pages/{WP_PAGE_ID}?context=edit"
     r = requests.get(url, auth=(WP_USERNAME, WP_APP_PASSWORD), timeout=HTTP_TIMEOUT_S, headers=DEFAULT_HEADERS)
     if r.status_code != 200:
         raise RuntimeError(f"WP GET fehlgeschlagen: {r.status_code} {r.text}")
     return r.json()
 
-def rebuild_container(full_html: str, inner_html: str) -> str:
-    """Entfernt ALLE vorhandenen Marker & Container, setzt EINEN frischen Container am Ende."""
+def rebuild_container_in_content(full_html: str, inner_html: str) -> str:
     start_marker = "<!-- IGUV_WEEKLY_START -->"
     end_marker   = "<!-- IGUV_WEEKLY_END -->"
-
-    # 1) Marker-Bereich komplett entfernen
-    full_html = re.sub(
-        re.escape(start_marker) + r".*?" + re.escape(end_marker),
-        "",
-        full_html,
-        flags=re.DOTALL
-    )
-
-    # 2) Alle vorhandenen Container mit der ID entfernen
-    pattern_div = re.compile(
-        rf'<div[^>]+id=["\']{re.escape(WP_CONTAINER_ID)}["\'][^>]*>.*?</div>',
-        re.IGNORECASE | re.DOTALL
-    )
+    # Marker löschen
+    full_html = re.sub(re.escape(start_marker) + r".*?" + re.escape(end_marker), "", full_html, flags=re.DOTALL)
+    # alle Container mit ID löschen
+    pattern_div = re.compile(rf'<div[^>]+id=["\']{re.escape(WP_CONTAINER_ID)}["\'][^>]*>.*?</div>',
+                             re.IGNORECASE | re.DOTALL)
     full_html = pattern_div.sub("", full_html)
+    # neuen Block anhängen
+    fresh = f'<!-- IGUV_WEEKLY_START -->\n<div id="{WP_CONTAINER_ID}">{inner_html}</div>\n<!-- IGUV_WEEKLY_END -->'
+    return (full_html + "\n" + fresh).strip()
 
-    # 3) Einen frischen Block anhängen (am Ende des Inhalts)
-    fresh_block = f'<!-- IGUV_WEEKLY_START -->\n<div id="{WP_CONTAINER_ID}">{inner_html}</div>\n<!-- IGUV_WEEKLY_END -->'
-    if full_html.endswith("</p>") or full_html.endswith("</div>"):
-        return full_html + "\n" + fresh_block
-    return full_html + "\n\n" + fresh_block
-
-def replace_container_html(full_html: str, inner_html: str) -> str:
-    """
-    replace: Ersetzt zwischen Marker oder innerhalb bestehendem DIV mit ID.
-    Wenn nichts gefunden: hängt neu an.
-    """
+def replace_container_in_content(full_html: str, inner_html: str) -> str:
     start_marker = "<!-- IGUV_WEEKLY_START -->"
     end_marker   = "<!-- IGUV_WEEKLY_END -->"
     if start_marker in full_html and end_marker in full_html:
         pattern = re.compile(re.escape(start_marker) + r".*?" + re.escape(end_marker), re.DOTALL)
-        replacement = start_marker + "\n" + f'<div id="{WP_CONTAINER_ID}">{inner_html}</div>' + "\n" + end_marker
-        return pattern.sub(replacement, full_html)
-
-    pattern_div = re.compile(
-        rf'(<div[^>]+id=["\']{re.escape(WP_CONTAINER_ID)}["\'][^>]*>)(.*?)(</div>)',
-        re.IGNORECASE | re.DOTALL
-    )
+        return pattern.sub(start_marker + "\n" + f'<div id="{WP_CONTAINER_ID}">{inner_html}</div>' + "\n" + end_marker, full_html)
+    pattern_div = re.compile(rf'(<div[^>]+id=["\']{re.escape(WP_CONTAINER_ID)}["\'][^>]*>)(.*?)(</div>)',
+                             re.IGNORECASE | re.DOTALL)
     if pattern_div.search(full_html):
         return pattern_div.sub(rf'\1{inner_html}\3', full_html)
+    # sonst anhängen
+    return (full_html + "\n" + f'<!-- IGUV_WEEKLY_START -->\n<div id="{WP_CONTAINER_ID}">{inner_html}</div>\n<!-- IGUV_WEEKLY_END -->').strip()
 
-    # nichts gefunden → anhängen
-    return full_html + "\n" + f'<!-- IGUV_WEEKLY_START -->\n<div id="{WP_CONTAINER_ID}">{inner_html}</div>\n<!-- IGUV_WEEKLY_END -->'
+def elementor_replace_html(html_text: str, inner_html: str) -> str:
+    """Ersetzt Marker oder Container-ID innerhalb eines Elementor-HTML-Widgets."""
+    before = html_text
+    # Zuerst Marker
+    start_marker = "<!-- IGUV_WEEKLY_START -->"
+    end_marker   = "<!-- IGUV_WEEKLY_END -->"
+    if start_marker in html_text and end_marker in html_text:
+        pattern = re.compile(re.escape(start_marker) + r".*?" + re.escape(end_marker), re.DOTALL)
+        return pattern.sub(start_marker + "\n" + inner_html + "\n" + end_marker, html_text)
+    # Dann Container-ID
+    pattern_div = re.compile(rf'(<div[^>]+id=["\']{re.escape(WP_CONTAINER_ID)}["\'][^>]*>)(.*?)(</div>)',
+                             re.IGNORECASE | re.DOTALL)
+    if pattern_div.search(html_text):
+        return pattern_div.sub(rf'\1{inner_html}\3', html_text)
+    # Falls weder Marker noch ID vorhanden, unverändert lassen
+    return before
 
-def update_wp(inner_inner_html: str):
-    page = fetch_wp_page()
-    current_html = page.get("content", {}).get("raw") or page.get("content", {}).get("rendered", "")
+def elementor_update_html_widget(elementor_data_json: str, inner_html: str) -> tuple[str, bool]:
+    """
+    Sucht im _elementor_data JSON nach einem HTML-Widget (widgetType='html'), ersetzt dort Marker/Container.
+    Gibt (updated_json_string, was_geaendert) zurück.
+    """
+    try:
+        data = json.loads(elementor_data_json)
+    except Exception:
+        return elementor_data_json, False
 
-    if CONTAINER_STRATEGY.lower() == "rebuild":
-        new_html = rebuild_container(current_html, inner_inner_html)
-    else:
-        new_html = replace_container_html(current_html, inner_inner_html)
+    changed = False
 
+    def walk(nodes):
+        nonlocal changed
+        for n in nodes or []:
+            if n.get("elType") == "widget" and n.get("widgetType") == "html":
+                settings = n.get("settings", {})
+                html_val = settings.get("html", "")
+                new_val = elementor_replace_html(html_val, inner_html)
+                if new_val != html_val:
+                    settings["html"] = new_val
+                    n["settings"] = settings
+                    changed = True
+            # Kinder
+            for key in ("elements", "innerElements"):
+                if key in n and isinstance(n[key], list):
+                    walk(n[key])
+
+    walk(data if isinstance(data, list) else [])
+    if not changed:
+        return elementor_data_json, False
+
+    try:
+        return json.dumps(data, ensure_ascii=False), True
+    except Exception:
+        return elementor_data_json, False
+
+def wp_update_page(payload: dict):
     url = f"{WP_BASE}/wp-json/wp/v2/pages/{WP_PAGE_ID}"
-    r = requests.post(
-        url,
-        auth=(WP_USERNAME, WP_APP_PASSWORD),
-        json={"content": new_html},
-        timeout=HTTP_TIMEOUT_S,
-        headers=DEFAULT_HEADERS
-    )
+    r = requests.post(url, auth=(WP_USERNAME, WP_APP_PASSWORD),
+                      json=payload, timeout=HTTP_TIMEOUT_S, headers=DEFAULT_HEADERS)
     if r.status_code not in (200, 201):
         raise RuntimeError(f"WP UPDATE fehlgeschlagen: {r.status_code} {r.text}")
     return r.json()
@@ -339,6 +360,7 @@ def main():
     sections_cfg = cfg.get("sections", [])
     style = cfg.get("summary", {}).get("style", "Kompakt, sachlich.")
 
+    # ---- Quellen scannen ----
     print("Quellen scannen …")
     sections_payload = []
     total_candidates = 0
@@ -361,16 +383,45 @@ def main():
 
     print(f"Gesamt-Kandidaten (gekappt): {total_candidates} / Limit {MAX_TOTAL_CANDIDATES}")
 
+    # ---- KI ----
     print("KI-Zusammenfassung …")
     digest = summarize_with_openai(sections_payload, max_per_section=MAX_ITEMS_PER_SECTION_KI, style=style)
     total_items = sum(len(s.get("items", [])) for s in digest.get("sections", []))
     print(f"Relevante Meldungen nach KI: {total_items}")
 
+    # ---- HTML ----
     print("HTML generieren …")
-    html_inner = to_html(digest, days=days)
+    inner_html = to_html(digest, days=days)
 
-    print(f"WordPress aktualisieren … (Strategie: {CONTAINER_STRATEGY})")
-    updated = update_wp(html_inner)
+    # ---- WordPress Update ----
+    print("WordPress aktualisieren …")
+    page = wp_get_page()
+    content_raw = page.get("content", {}).get("raw") or page.get("content", {}).get("rendered", "") or ""
+    meta = page.get("meta") or {}
+
+    # 1) Versuch: Elementor-HTML-Widget ersetzen (falls vorhanden)
+    elementor_data = meta.get("_elementor_data")
+    did_elementor = False
+    updated_meta = None
+    if isinstance(elementor_data, str) and elementor_data.strip():
+        new_json, changed = elementor_update_html_widget(elementor_data, inner_html)
+        if changed:
+            updated_meta = dict(meta)
+            updated_meta["_elementor_data"] = new_json
+            did_elementor = True
+            print(" - Elementor-HTML-Widget gefunden & ersetzt.")
+
+    # 2) Content ersetzen/neu anhängen (parallel, damit beide Pfade abgedeckt sind)
+    if CONTAINER_STRATEGY.lower() == "rebuild":
+        new_content = rebuild_container_in_content(content_raw, inner_html)
+    else:
+        new_content = replace_container_in_content(content_raw, inner_html)
+
+    payload = {"content": new_content}
+    if did_elementor and updated_meta is not None:
+        payload["meta"] = updated_meta
+
+    updated = wp_update_page(payload)
     link = updated.get("link") or updated.get("guid", {}).get("rendered", "")
     mod  = updated.get("modified") or updated.get("modified_gmt", "")
     print(f"SUCCESS: WP aktualisiert. modified={mod} link={link}")
