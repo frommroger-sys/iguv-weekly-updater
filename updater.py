@@ -1,5 +1,4 @@
 import os, sys, json, re, datetime, traceback
-from dateutil.relativedelta import relativedelta
 from dateutil.tz import gettz
 import yaml
 import requests
@@ -89,41 +88,6 @@ def update_wp_page(new_container_html: str) -> dict:
     return r.json()
 
 # ========= KI-Funktion mit Websearch =========
-def build_json_schema():
-    return {
-        "name": "WeeklyDigest",
-        "schema": {
-            "type": "object",
-            "properties": {
-                "sections": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "name": {"type": "string"},
-                            "items": {
-                                "type": "array",
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "title": {"type": "string"},
-                                        "url": {"type": "string"},
-                                        "date_iso": {"type": "string"},
-                                        "summary": {"type": "string"}
-                                    },
-                                    "required": ["title", "url", "date_iso", "summary"]
-                                }
-                            }
-                        },
-                        "required": ["name", "items"]
-                    }
-                }
-            },
-            "required": ["sections"],
-            "additionalProperties": False
-        }
-    }
-
 def query_openai_digest(cfg: dict) -> dict:
     client = OpenAI(api_key=OPENAI_API_KEY)
     days = cfg.get("time_window_days", 7)
@@ -135,22 +99,26 @@ def query_openai_digest(cfg: dict) -> dict:
         "Jeder Punkt: Titel, URL, ISO-Datum, 1–2 Sätze Kurzfazit."
     )
 
-    response = client.responses.create(
+    completion = client.chat.completions.create(
         model=MODEL,
         tools=[{"type": "web_search"}],
-        response_format={"type": "json_schema", "json_schema": build_json_schema()},
-        input=[{
-            "role": "user",
-            "content": [
-                {"type": "text", "text": instruction},
-                {"type": "input_text", "text": json.dumps({
-                    "sections": cfg.get("sections", [])
-                }, ensure_ascii=False)}
-            ]
-        }]
+        response_format={"type": "json_object"},
+        messages=[
+            {"role": "system", "content": "Du bist ein präziser Nachrichten-Editor für Finanz- und Regulierungsthemen in der Schweiz."},
+            {"role": "user", "content": json.dumps({
+                "instructions": instruction,
+                "sections": cfg.get("sections", [])
+            }, ensure_ascii=False)}
+        ],
+        temperature=0.2
     )
 
-    return json.loads(response.output_text)
+    txt = completion.choices[0].message.content
+    try:
+        return json.loads(txt)
+    except Exception:
+        print("WARN: Konnte KI-Output nicht als JSON parsen. Rohtext:", (txt or "")[:500])
+        return {"sections": []}
 
 # ========= Main =========
 def main():
