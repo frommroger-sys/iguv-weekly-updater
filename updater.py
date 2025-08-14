@@ -17,7 +17,7 @@ WP_CONTAINER_ID  = os.environ.get("WP_CONTAINER_ID", "weekly-update-content")
 CONTAINER_STRATEGY = os.environ.get("CONTAINER_STRATEGY", "rebuild")  # rebuild | replace
 TZ               = os.environ.get("TZ", "Europe/Zurich")
 
-# Limits & Timeouts (Safe Defaults)
+# Limits & Timeouts
 HTTP_TIMEOUT_S             = int(os.environ.get("HTTP_TIMEOUT_S", "25"))
 HTTP_MAX_RETRIES           = int(os.environ.get("HTTP_MAX_RETRIES", "2"))
 MAX_LINKS_PER_SOURCE       = int(os.environ.get("MAX_LINKS_PER_SOURCE", "40"))
@@ -25,12 +25,12 @@ MAX_TOTAL_CANDIDATES       = int(os.environ.get("MAX_TOTAL_CANDIDATES", "150"))
 MAX_ITEMS_PER_SECTION_KI   = int(os.environ.get("MAX_ITEMS_PER_SECTION_KI", "5"))
 OPENAI_REQUEST_TIMEOUT_S   = int(os.environ.get("OPENAI_REQUEST_TIMEOUT_S", "60"))
 
-USER_AGENT = "Mozilla/5.0 (compatible; IGUV-Weekly-Updater/2.3; +https://iguv.ch)"
-DEFAULT_HEADERS = {
+USER_AGENT = "Mozilla/5.0 (compatible; IGUV-Weekly-Updater/2.4; +https://iguv.ch)"
+DEFAULT_HEADERS_JSON = {
     "User-Agent": USER_AGENT,
     "Accept": "application/json, text/plain, */*",
 }
-DEFAULT_HTML_HEADERS = {
+DEFAULT_HEADERS_HTML = {
     "User-Agent": USER_AGENT,
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "de-CH,de;q=0.9,en;q=0.8",
@@ -63,7 +63,7 @@ def http_get_html(url: str) -> requests.Response:
     last_err = None
     for _ in range(HTTP_MAX_RETRIES):
         try:
-            return requests.get(url, headers=DEFAULT_HTML_HEADERS, timeout=HTTP_TIMEOUT_S)
+            return requests.get(url, headers=DEFAULT_HEADERS_HTML, timeout=HTTP_TIMEOUT_S)
         except Exception as e:
             last_err = e
     raise last_err
@@ -141,15 +141,12 @@ def extract_candidates(list_url: str, days: int, keywords: list[str]) -> list[di
             continue
         if not same_site(href, base):
             continue
-
         blob = (text + " " + href).lower()
         if kws and not any(k in blob for k in kws):
             continue
-
         d = parse_date_heuristic(text) or parse_date_heuristic(href)
         if d and not is_within_days(d, days):
             continue
-
         out.append({
             "title": text[:240],
             "url": href,
@@ -215,8 +212,7 @@ def to_html(digest: dict, days: int) -> str:
     any_item = False
     for sec in digest.get("sections", []):
         items = sec.get("items", []) or []
-        if not items:
-            continue
+        if not items: continue
         any_item = True
         parts.append(f'<h3 style="margin-top:1.2em;">{sec.get("name","")}</h3>')
         parts.append("<ul>")
@@ -235,7 +231,7 @@ def to_html(digest: dict, days: int) -> str:
 # -------- WordPress I/O --------
 def wp_get_page():
     url = f"{WP_BASE}/wp-json/wp/v2/pages/{WP_PAGE_ID}?context=edit"
-    r = requests.get(url, auth=(WP_USERNAME, WP_APP_PASSWORD), timeout=HTTP_TIMEOUT_S, headers=DEFAULT_HEADERS)
+    r = requests.get(url, auth=(WP_USERNAME, WP_APP_PASSWORD), timeout=HTTP_TIMEOUT_S, headers=DEFAULT_HEADERS_JSON)
     if r.status_code != 200:
         raise RuntimeError(f"WP GET fehlgeschlagen: {r.status_code} {r.text}")
     return r.json()
@@ -243,13 +239,9 @@ def wp_get_page():
 def rebuild_container_in_content(full_html: str, inner_html: str) -> str:
     start_marker = "<!-- IGUV_WEEKLY_START -->"
     end_marker   = "<!-- IGUV_WEEKLY_END -->"
-    # Marker löschen
     full_html = re.sub(re.escape(start_marker) + r".*?" + re.escape(end_marker), "", full_html, flags=re.DOTALL)
-    # alle Container mit ID löschen
-    pattern_div = re.compile(rf'<div[^>]+id=["\']{re.escape(WP_CONTAINER_ID)}["\'][^>]*>.*?</div>',
-                             re.IGNORECASE | re.DOTALL)
+    pattern_div = re.compile(rf'<div[^>]+id=["\']{re.escape(WP_CONTAINER_ID)}["\'][^>]*>.*?</div>', re.IGNORECASE | re.DOTALL)
     full_html = pattern_div.sub("", full_html)
-    # neuen Block anhängen
     fresh = f'<!-- IGUV_WEEKLY_START -->\n<div id="{WP_CONTAINER_ID}">{inner_html}</div>\n<!-- IGUV_WEEKLY_END -->'
     return (full_html + "\n" + fresh).strip()
 
@@ -259,46 +251,44 @@ def replace_container_in_content(full_html: str, inner_html: str) -> str:
     if start_marker in full_html and end_marker in full_html:
         pattern = re.compile(re.escape(start_marker) + r".*?" + re.escape(end_marker), re.DOTALL)
         return pattern.sub(start_marker + "\n" + f'<div id="{WP_CONTAINER_ID}">{inner_html}</div>' + "\n" + end_marker, full_html)
-    pattern_div = re.compile(rf'(<div[^>]+id=["\']{re.escape(WP_CONTAINER_ID)}["\'][^>]*>)(.*?)(</div>)',
-                             re.IGNORECASE | re.DOTALL)
+    pattern_div = re.compile(rf'(<div[^>]+id=["\']{re.escape(WP_CONTAINER_ID)}["\'][^>]*>)(.*?)(</div>)', re.IGNORECASE | re.DOTALL)
     if pattern_div.search(full_html):
         return pattern_div.sub(rf'\1{inner_html}\3', full_html)
-    # sonst anhängen
     return (full_html + "\n" + f'<!-- IGUV_WEEKLY_START -->\n<div id="{WP_CONTAINER_ID}">{inner_html}</div>\n<!-- IGUV_WEEKLY_END -->').strip()
 
 def elementor_replace_html(html_text: str, inner_html: str) -> str:
-    """Ersetzt Marker oder Container-ID innerhalb eines Elementor-HTML-Widgets."""
-    before = html_text
-    # Zuerst Marker
     start_marker = "<!-- IGUV_WEEKLY_START -->"
     end_marker   = "<!-- IGUV_WEEKLY_END -->"
     if start_marker in html_text and end_marker in html_text:
         pattern = re.compile(re.escape(start_marker) + r".*?" + re.escape(end_marker), re.DOTALL)
         return pattern.sub(start_marker + "\n" + inner_html + "\n" + end_marker, html_text)
-    # Dann Container-ID
-    pattern_div = re.compile(rf'(<div[^>]+id=["\']{re.escape(WP_CONTAINER_ID)}["\'][^>]*>)(.*?)(</div>)',
-                             re.IGNORECASE | re.DOTALL)
+    pattern_div = re.compile(rf'(<div[^>]+id=["\']{re.escape(WP_CONTAINER_ID)}["\'][^>]*>)(.*?)(</div>)', re.IGNORECASE | re.DOTALL)
     if pattern_div.search(html_text):
         return pattern_div.sub(rf'\1{inner_html}\3', html_text)
-    # Falls weder Marker noch ID vorhanden, unverändert lassen
-    return before
+    return html_text  # unverändert
 
-def elementor_update_html_widget(elementor_data_json: str, inner_html: str) -> tuple[str, bool]:
+def elementor_update_html_widget(elementor_data_json: str, inner_html: str, force_if_no_match: bool = True) -> tuple[str, bool, bool]:
     """
-    Sucht im _elementor_data JSON nach einem HTML-Widget (widgetType='html'), ersetzt dort Marker/Container.
-    Gibt (updated_json_string, was_geaendert) zurück.
+    Sucht im _elementor_data nach einem HTML-Widget.
+    - Ersetzt Marker/Container innerhalb des Widgets.
+    - Wenn kein Treffer und force_if_no_match=True: überschreibt das ERSTE HTML-Widget.
+    Rückgabe: (updated_json, changed, forced)
     """
     try:
         data = json.loads(elementor_data_json)
     except Exception:
-        return elementor_data_json, False
+        return elementor_data_json, False, False
 
     changed = False
+    forced  = False
+    first_html_node = None
 
     def walk(nodes):
-        nonlocal changed
+        nonlocal changed, forced, first_html_node
         for n in nodes or []:
             if n.get("elType") == "widget" and n.get("widgetType") == "html":
+                if first_html_node is None:
+                    first_html_node = n
                 settings = n.get("settings", {})
                 html_val = settings.get("html", "")
                 new_val = elementor_replace_html(html_val, inner_html)
@@ -308,22 +298,33 @@ def elementor_update_html_widget(elementor_data_json: str, inner_html: str) -> t
                     changed = True
             # Kinder
             for key in ("elements", "innerElements"):
-                if key in n and isinstance(n[key], list):
+                if isinstance(n.get(key), list):
                     walk(n[key])
 
     walk(data if isinstance(data, list) else [])
+
+    # Falls kein Treffer: erstes HTML-Widget überschreiben
+    if not changed and force_if_no_match and first_html_node is not None:
+        print(" - Kein Marker/Container im Elementor-HTML gefunden – überschreibe das erste HTML-Widget (FORCED).")
+        settings = first_html_node.get("settings", {}) or {}
+        forced_block = f"<!-- IGUV_WEEKLY_START -->\n<div id=\"{WP_CONTAINER_ID}\">{inner_html}</div>\n<!-- IGUV_WEEKLY_END -->"
+        settings["html"] = forced_block
+        first_html_node["settings"] = settings
+        changed = True
+        forced = True
+
     if not changed:
-        return elementor_data_json, False
+        return elementor_data_json, False, False
 
     try:
-        return json.dumps(data, ensure_ascii=False), True
+        return json.dumps(data, ensure_ascii=False), True, forced
     except Exception:
-        return elementor_data_json, False
+        return elementor_data_json, False, False
 
 def wp_update_page(payload: dict):
     url = f"{WP_BASE}/wp-json/wp/v2/pages/{WP_PAGE_ID}"
-    r = requests.post(url, auth=(WP_USERNAME, WP_APP_PASSWORD),
-                      json=payload, timeout=HTTP_TIMEOUT_S, headers=DEFAULT_HEADERS)
+    r = requests.post(url, auth=(WP_USERNAME, WP_APP_PASSWORD), json=payload,
+                      timeout=HTTP_TIMEOUT_S, headers=DEFAULT_HEADERS_JSON)
     if r.status_code not in (200, 201):
         raise RuntimeError(f"WP UPDATE fehlgeschlagen: {r.status_code} {r.text}")
     return r.json()
@@ -338,7 +339,7 @@ def main():
     require_env()
     cfg = load_yaml("data_sources.yaml")
 
-    # FAST-Modus: nur wesentliche Quellen
+    # FAST-Modus
     if args.fast:
         core_domains = {"finma.ch", "seco.admin.ch", "ofac.treasury.gov"}
         filtered_sections = []
@@ -360,7 +361,6 @@ def main():
     sections_cfg = cfg.get("sections", [])
     style = cfg.get("summary", {}).get("style", "Kompakt, sachlich.")
 
-    # ---- Quellen scannen ----
     print("Quellen scannen …")
     sections_payload = []
     total_candidates = 0
@@ -383,35 +383,37 @@ def main():
 
     print(f"Gesamt-Kandidaten (gekappt): {total_candidates} / Limit {MAX_TOTAL_CANDIDATES}")
 
-    # ---- KI ----
     print("KI-Zusammenfassung …")
     digest = summarize_with_openai(sections_payload, max_per_section=MAX_ITEMS_PER_SECTION_KI, style=style)
     total_items = sum(len(s.get("items", [])) for s in digest.get("sections", []))
     print(f"Relevante Meldungen nach KI: {total_items}")
 
-    # ---- HTML ----
     print("HTML generieren …")
     inner_html = to_html(digest, days=days)
 
-    # ---- WordPress Update ----
     print("WordPress aktualisieren …")
     page = wp_get_page()
     content_raw = page.get("content", {}).get("raw") or page.get("content", {}).get("rendered", "") or ""
     meta = page.get("meta") or {}
 
-    # 1) Versuch: Elementor-HTML-Widget ersetzen (falls vorhanden)
-    elementor_data = meta.get("_elementor_data")
+    # Elementor: versuchen zu ersetzen oder forcieren
     did_elementor = False
+    forced_html_widget = False
+    elementor_data = meta.get("_elementor_data")
     updated_meta = None
     if isinstance(elementor_data, str) and elementor_data.strip():
-        new_json, changed = elementor_update_html_widget(elementor_data, inner_html)
+        new_json, changed, forced = elementor_update_html_widget(elementor_data, inner_html, force_if_no_match=True)
         if changed:
             updated_meta = dict(meta)
             updated_meta["_elementor_data"] = new_json
             did_elementor = True
-            print(" - Elementor-HTML-Widget gefunden & ersetzt.")
+            forced_html_widget = forced
+            if forced_html_widget:
+                print(" - Elementor: erstes HTML-Widget überschrieben (FORCED).")
+            else:
+                print(" - Elementor: HTML-Widget mit Marker/Container ersetzt.")
 
-    # 2) Content ersetzen/neu anhängen (parallel, damit beide Pfade abgedeckt sind)
+    # Zusätzlich: klassischen content pflegen (falls Theme den Content rendert)
     if CONTAINER_STRATEGY.lower() == "rebuild":
         new_content = rebuild_container_in_content(content_raw, inner_html)
     else:
