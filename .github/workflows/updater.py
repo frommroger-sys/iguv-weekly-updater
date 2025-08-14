@@ -1,14 +1,15 @@
+import os
 # updater.py – IGUV Weekly Website Updater (korrigierte Version)
 import sys, subprocess, re, json
 from datetime import datetime, timedelta
 
 # ======= KONFIG =======
-WP_BASE         = "https://iguv.ch".rstrip("/")
-WP_PAGE_ID      = 50489
-WP_USERNAME     = "agent@iguv.ch"
-WP_APP_PASSWORD = "jKL7 idYw xsnb 8Nyy sSXl WOjc"   # Application Password
-WP_CONTAINER_ID = "weekly-update-content"
-USER_AGENT      = "IGUV-Weekly-Updater/2.0 (+https://iguv.ch)"
+WP_BASE         = os.environ.get("WP_BASE", "https://iguv.ch").rstrip("/")
+WP_PAGE_ID      = int(os.environ.get("WP_PAGE_ID", "50489"))
+WP_USERNAME     = os.environ.get("WP_USERNAME", "")
+WP_APP_PASSWORD = os.environ.get("WP_APP_PASSWORD", "")
+WP_CONTAINER_ID = os.environ.get("WP_CONTAINER_ID", "weekly-update-content")
+USER_AGENT      = os.environ.get("USER_AGENT", "IGUV-Weekly-Updater/2.0 (+https://iguv.ch)")
 
 # ======= DEPS =======
 try:
