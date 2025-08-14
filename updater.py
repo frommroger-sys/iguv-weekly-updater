@@ -204,3 +204,78 @@ def update_wp(inner_html: str):
     r = requests.post(url, auth=(WP_USERNAME, WP_APP_PASSWORD), json={"content": new_html}, timeout=60)
     if r.status_code not in (200, 201):
         raise RuntimeError(f"WP UPDATE fehlgeschlagen: {r.status_code} {r.text}")
+return r.json()
+
+def require_env():
+    missing = []
+    if not OPENAI_API_KEY: missing.append("OPENAI_API_KEY")
+    if not WP_BASE: missing.append("WP_BASE")
+    if not WP_PAGE_ID: missing.append("WP_PAGE_ID")
+    if not WP_USERNAME: missing.append("WP_USERNAME")
+    if not WP_APP_PASSWORD: missing.append("WP_APP_PASSWORD")
+    if missing:
+        raise RuntimeError("Fehlende ENV Variablen: " + ", ".join(missing))
+
+def main():
+    print("== IGUV/INPASU Weekly Updater startet ==")
+    print("ENV-Sanity:",
+          "OPENAI_API_KEY:", bool(OPENAI_API_KEY),
+          "MODEL:", MODEL,
+          "WP_BASE:", bool(WP_BASE),
+          "WP_PAGE_ID:", bool(WP_PAGE_ID),
+          "WP_USERNAME:", bool(WP_USERNAME),
+          "WP_APP_PASSWORD:", bool(WP_APP_PASSWORD),
+          "WP_CONTAINER_ID:", WP_CONTAINER_ID)
+
+    require_env()
+
+    cfg = load_yaml("data_sources.yaml")
+    days = int(cfg.get("time_window_days", 7))
+    keywords = cfg.get("keywords", [])
+    sections_cfg = cfg.get("sections", [])
+    max_bullets = int(cfg.get("summary", {}).get("max_bullets_per_section", 5))
+    style = cfg.get("summary", {}).get("style", "Kompakt, sachlich.")
+
+    # 1) Scrape & vorfiltern
+    print("Quellen scannen …")
+    sections_payload = []
+    for block in sections_cfg:
+        name = block.get("name", "Sektion")
+        urls = block.get("sources", [])
+        all_items = []
+        for u in urls:
+            items = extract_candidates(u, days=days, keywords=keywords)
+            all_items.extend(items)
+        # leichte Priorisierung: jüngstes Datum zuerst
+        def sort_key(it):
+            try:
+                return it["date"] or ""
+            except Exception:
+                return ""
+        all_items.sort(key=sort_key, reverse=True)
+        sections_payload.append({"name": name, "candidates": all_items})
+
+    # 2) KI-Kurzfassung
+    print("KI-Zusammenfassung …")
+    digest = summarize_with_openai(sections_payload, max_per_section=max_bullets, style=style)
+
+    # 3) HTML rendern
+    print("HTML generieren …")
+    html = to_html(digest, days=days)
+
+    # 4) WordPress aktualisieren
+    print("WordPress aktualisieren …")
+    updated = update_wp(html)
+    link = updated.get("link") or updated.get("guid", {}).get("rendered", "")
+    mod  = updated.get("modified") or updated.get("modified_gmt", "")
+    print(f"SUCCESS: WP aktualisiert. modified={mod} link={link}")
+
+    print("== Fertig ==")
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        print("ERROR:", repr(e))
+        traceback.print_exc()
+        sys.exit(2)
