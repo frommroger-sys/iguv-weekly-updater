@@ -149,8 +149,8 @@ def summarize_with_openai(sections_payload: list[dict], max_per_section: int, st
         {"role": "system", "content": sys_prompt},
         {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)}
     ],
-    temperature: 0.2
-)
+    temperature=0.2
+    ) 
     txt = completion.choices[0].message.content
     try:
         data = json.loads(txt)
