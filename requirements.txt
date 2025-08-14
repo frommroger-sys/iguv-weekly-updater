@@ -1,2 +1,6 @@
-requests
-beautifulsoup4
+openai>=1.30.0
+requests>=2.32.0
+pyyaml>=6.0.1
+beautifulsoup4>=4.12.3
+lxml>=5.2.2
+python-dateutil>=2.9.0
