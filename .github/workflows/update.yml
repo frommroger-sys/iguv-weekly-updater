@@ -1,10 +1,14 @@
-name: IGUV Weekly Website Updater
+name: IGUV Weekly Website Updater (Safe Mode + Rebuild Container)
 
 on:
-  # ▶ "Run workflow"-Button in GitHub → Actions
-  workflow_dispatch: {}
-  # ⏰ Wöchentlich: Donnerstag 06:00 Europe/Zurich = 04:00 UTC
+  workflow_dispatch:
+    inputs:
+      fast:
+        description: "FAST-Modus (nur Kernquellen; schneller, weniger Last)"
+        required: false
+        default: "true"
   schedule:
+    # Donnerstag 06:00 Europe/Zurich = 04:00 UTC
     - cron: "0 4 * * 4"
 
 jobs:
@@ -13,10 +17,23 @@ jobs:
 
     env:
       TZ: Europe/Zurich
+
+      # Modell & Limits (passen zum updater.py)
       OPENAI_MODEL: gpt-4o-mini
+      HTTP_TIMEOUT_S: "25"
+      HTTP_MAX_RETRIES: "2"
+      MAX_LINKS_PER_SOURCE: "40"
+      MAX_TOTAL_CANDIDATES: "150"
+      MAX_ITEMS_PER_SECTION_KI: "5"
+      OPENAI_REQUEST_TIMEOUT_S: "60"
+
+      # --- WICHTIG: Container-Strategie ---
+      # 'rebuild' = ALLE vorhandenen Container/Marker entfernen und EINEN frischen Block einsetzen.
+      # 'replace' = nur Inhalt innerhalb vorhandener ID/Marker ersetzen (fallback).
+      CONTAINER_STRATEGY: rebuild
       WP_CONTAINER_ID: weekly-update-content
 
-      # Repository Secrets (Repo → Settings → Secrets and variables → Actions)
+      # Secrets (Repo → Settings → Secrets and variables → Actions)
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       WP_BASE: ${{ secrets.WP_BASE }}
       WP_PAGE_ID: ${{ secrets.WP_PAGE_ID }}
@@ -52,15 +69,22 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run updater
+      - name: Run updater (FAST optional)
         run: |
           echo "Starte Weekly Update ..."
-          python updater.py
+          if [ "${{ github.event.inputs.fast }}" = "true" ]; then
+            echo "FAST-Modus aktiv."
+            python updater.py --fast
+          else
+            python updater.py
+          fi
 
       - name: Dump diagnostics (on failure)
         if: failure()
         run: |
           echo "=== Python version ==="
           python --version
+          echo "=== Working dir ==="
+          pwd
           echo "=== Files ==="
           ls -la
