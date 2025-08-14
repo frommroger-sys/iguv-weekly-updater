@@ -14,6 +14,7 @@ WP_PAGE_ID       = os.environ.get("WP_PAGE_ID", "")
 WP_USERNAME      = os.environ.get("WP_USERNAME", "")
 WP_APP_PASSWORD  = os.environ.get("WP_APP_PASSWORD", "")
 WP_CONTAINER_ID  = os.environ.get("WP_CONTAINER_ID", "weekly-update-content")
+CONTAINER_STRATEGY = os.environ.get("CONTAINER_STRATEGY", "rebuild")  # rebuild | replace
 TZ               = os.environ.get("TZ", "Europe/Zurich")
 
 # Limits & Timeouts (Safe Defaults)
@@ -24,7 +25,7 @@ MAX_TOTAL_CANDIDATES       = int(os.environ.get("MAX_TOTAL_CANDIDATES", "150"))
 MAX_ITEMS_PER_SECTION_KI   = int(os.environ.get("MAX_ITEMS_PER_SECTION_KI", "5"))
 OPENAI_REQUEST_TIMEOUT_S   = int(os.environ.get("OPENAI_REQUEST_TIMEOUT_S", "60"))
 
-USER_AGENT = "Mozilla/5.0 (compatible; IGUV-Weekly-Updater/2.1; +https://iguv.ch)"
+USER_AGENT = "Mozilla/5.0 (compatible; IGUV-Weekly-Updater/2.2; +https://iguv.ch)"
 DEFAULT_HEADERS = {
     "User-Agent": USER_AGENT,
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -158,20 +159,18 @@ def extract_candidates(list_url: str, days: int, keywords: list[str]) -> list[di
     for it in out:
         dedup[(it["title"], it["url"])] = it
     items = list(dedup.values())
-    print(f"   -> {len(items)} Kandidaten nach Filter (begrenzt auf {MAX_LINKS_PER_SOURCE} Links gescannt)")
+    print(f"   -> {len(items)} Kandidaten nach Filter (max {MAX_LINKS_PER_SOURCE} Links gescannt)")
     return items
 
 def summarize_with_openai(sections_payload: list[dict], max_per_section: int, style: str) -> dict:
     """Beschränkte, robuste Zusammenfassung im JSON-Mode."""
     client = OpenAI(api_key=OPENAI_API_KEY, timeout=OPENAI_REQUEST_TIMEOUT_S)
 
-    # Payload hart deckeln
+    # Payload kappten
     capped_sections = []
     total = 0
     for sec in sections_payload:
-        cand = sec.get("candidates", [])
-        # pro Sektion max 50 Kandidaten an die KI
-        cand = cand[:50]
+        cand = sec.get("candidates", [])[:50]
         capped_sections.append({"name": sec.get("name", "Sektion"), "candidates": cand})
         total += len(cand)
         if total >= MAX_TOTAL_CANDIDATES:
@@ -180,13 +179,13 @@ def summarize_with_openai(sections_payload: list[dict], max_per_section: int, st
     sys_prompt = (
         "Du bist ein präziser Nachrichten-Editor für Finanz-/Regulierungsthemen in der Schweiz. "
         f"Erstelle pro Sektion maximal {max_per_section} Punkte. "
-        "Jeder Punkt: title, url, date_iso (YYYY-MM-DD; wenn None → heutiges Datum), "
-        "summary (1–2 Sätze; warum relevant). "
+        "Jeder Punkt: title, url, date_iso (YYYY-MM-DD; wenn None → heutiges Datum), summary (1–2 Sätze). "
         "Gib das Ergebnis als JSON-Objekt {\"sections\":[{\"name\":\"...\",\"items\":[...]}]} zurück."
     )
 
     user_payload = {
         "generated_at": iso_now_local(),
+        "style": style,
         "sections": capped_sections,
         "note": f"KI sieht max. {MAX_TOTAL_CANDIDATES} Kandidaten insgesamt; pro Sektion max. 50."
     }
@@ -229,8 +228,9 @@ def to_html(digest: dict, days: int) -> str:
     if not any_item:
         parts.append("<p>Keine relevanten Neuigkeiten in den letzten Tagen.</p>")
     parts.append(f'<hr><p style="font-size:12px;color:#666;">Automatisch erstellt (letzte {days} Tage).</p>')
-    return f'<div id="{WP_CONTAINER_ID}">' + "\n".join(parts) + "</div>"
+    return "\n".join(parts)
 
+# -------- WordPress I/O --------
 def fetch_wp_page():
     url = f"{WP_BASE}/wp-json/wp/v2/pages/{WP_PAGE_ID}?context=edit"
     r = requests.get(url, auth=(WP_USERNAME, WP_APP_PASSWORD), timeout=HTTP_TIMEOUT_S, headers=DEFAULT_HEADERS)
@@ -238,39 +238,76 @@ def fetch_wp_page():
         raise RuntimeError(f"WP GET fehlgeschlagen: {r.status_code} {r.text}")
     return r.json()
 
+def rebuild_container(full_html: str, inner_html: str) -> str:
+    """Entfernt ALLE vorhandenen Marker & Container, setzt EINEN frischen Container am Ende."""
+    start_marker = "<!-- IGUV_WEEKLY_START -->"
+    end_marker   = "<!-- IGUV_WEEKLY_END -->"
+
+    # 1) Marker-Bereich komplett entfernen
+    full_html = re.sub(
+        re.escape(start_marker) + r".*?" + re.escape(end_marker),
+        "",
+        full_html,
+        flags=re.DOTALL
+    )
+
+    # 2) Alle vorhandenen Container mit der ID entfernen
+    pattern_div = re.compile(
+        rf'<div[^>]+id=["\']{re.escape(WP_CONTAINER_ID)}["\'][^>]*>.*?</div>',
+        re.IGNORECASE | re.DOTALL
+    )
+    full_html = pattern_div.sub("", full_html)
+
+    # 3) Einen frischen Block anhängen (am Ende des Inhalts)
+    fresh_block = f'<!-- IGUV_WEEKLY_START -->\n<div id="{WP_CONTAINER_ID}">{inner_html}</div>\n<!-- IGUV_WEEKLY_END -->'
+    if full_html.endswith("</p>") or full_html.endswith("</div>"):
+        return full_html + "\n" + fresh_block
+    return full_html + "\n\n" + fresh_block
+
 def replace_container_html(full_html: str, inner_html: str) -> str:
-    # Marker bevorzugt
+    """
+    replace: Ersetzt zwischen Marker oder innerhalb bestehendem DIV mit ID.
+    Wenn nichts gefunden: hängt neu an.
+    """
     start_marker = "<!-- IGUV_WEEKLY_START -->"
     end_marker   = "<!-- IGUV_WEEKLY_END -->"
     if start_marker in full_html and end_marker in full_html:
         pattern = re.compile(re.escape(start_marker) + r".*?" + re.escape(end_marker), re.DOTALL)
-        replacement = start_marker + "\n" + inner_html + "\n" + end_marker
+        replacement = start_marker + "\n" + f'<div id="{WP_CONTAINER_ID}">{inner_html}</div>' + "\n" + end_marker
         return pattern.sub(replacement, full_html)
 
-    # Fallback: Container-ID ersetzen/anhängen
     pattern_div = re.compile(
         rf'(<div[^>]+id=["\']{re.escape(WP_CONTAINER_ID)}["\'][^>]*>)(.*?)(</div>)',
         re.IGNORECASE | re.DOTALL
     )
     if pattern_div.search(full_html):
         return pattern_div.sub(rf'\1{inner_html}\3', full_html)
-    else:
-        block = f'<div id="{WP_CONTAINER_ID}">{inner_html}</div>'
-        return full_html + "\n" + block
 
-def update_wp(inner_html: str):
+    # nichts gefunden → anhängen
+    return full_html + "\n" + f'<!-- IGUV_WEEKLY_START -->\n<div id="{WP_CONTAINER_ID}">{inner_html}</div>\n<!-- IGUV_WEEKLY_END -->'
+
+def update_wp(inner_inner_html: str):
     page = fetch_wp_page()
     current_html = page.get("content", {}).get("raw") or page.get("content", {}).get("rendered", "")
-    new_html = replace_container_html(current_html, inner_html)
+
+    if CONTAINER_STRATEGY.lower() == "rebuild":
+        new_html = rebuild_container(current_html, inner_inner_html)
+    else:
+        new_html = replace_container_html(current_html, inner_inner_html)
+
     url = f"{WP_BASE}/wp-json/wp/v2/pages/{WP_PAGE_ID}"
-    r = requests.post(url, auth=(WP_USERNAME, WP_APP_PASSWORD),
-                      json={"content": new_html},
-                      timeout=HTTP_TIMEOUT_S,
-                      headers=DEFAULT_HEADERS)
+    r = requests.post(
+        url,
+        auth=(WP_USERNAME, WP_APP_PASSWORD),
+        json={"content": new_html},
+        timeout=HTTP_TIMEOUT_S,
+        headers=DEFAULT_HEADERS
+    )
     if r.status_code not in (200, 201):
         raise RuntimeError(f"WP UPDATE fehlgeschlagen: {r.status_code} {r.text}")
     return r.json()
 
+# -------- Main --------
 def main():
     parser = argparse.ArgumentParser(description="IGUV Weekly Updater")
     parser.add_argument("--fast", action="store_true", help="Nur Kernquellen verarbeiten (schneller, weniger Last).")
@@ -282,9 +319,7 @@ def main():
 
     # FAST-Modus: nur wesentliche Quellen
     if args.fast:
-        core_domains = {
-            "finma.ch", "seco.admin.ch", "ofac.treasury.gov"
-        }
+        core_domains = {"finma.ch", "seco.admin.ch", "ofac.treasury.gov"}
         filtered_sections = []
         for sec in cfg.get("sections", []):
             kept = []
@@ -315,14 +350,12 @@ def main():
             if total_candidates >= MAX_TOTAL_CANDIDATES:
                 break
             items = extract_candidates(u, days=days, keywords=keywords)
-            # cap global
             room = MAX_TOTAL_CANDIDATES - total_candidates
             if room <= 0:
                 break
             items = items[:room]
             total_candidates += len(items)
             all_items.extend(items)
-        # jüngere zuerst
         all_items.sort(key=lambda it: it.get("date") or "", reverse=True)
         sections_payload.append({"name": name, "candidates": all_items})
 
@@ -334,10 +367,10 @@ def main():
     print(f"Relevante Meldungen nach KI: {total_items}")
 
     print("HTML generieren …")
-    html = to_html(digest, days=days)
+    html_inner = to_html(digest, days=days)
 
-    print("WordPress aktualisieren …")
-    updated = update_wp(html)
+    print(f"WordPress aktualisieren … (Strategie: {CONTAINER_STRATEGY})")
+    updated = update_wp(html_inner)
     link = updated.get("link") or updated.get("guid", {}).get("rendered", "")
     mod  = updated.get("modified") or updated.get("modified_gmt", "")
     print(f"SUCCESS: WP aktualisiert. modified={mod} link={link}")
