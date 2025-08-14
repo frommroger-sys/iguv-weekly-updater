@@ -1,0 +1,58 @@
+name: IGUV Weekly Website Updater
+
+on:
+  schedule:
+    # Donnerstag 06:00 Europe/Zurich
+    - cron: '0 6 * * 4'
+  workflow_dispatch: {}  # erlaubt "Run workflow" jetzt sofort
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    env:
+      TZ: Europe/Zurich
+      WP_BASE: ${{ secrets.WP_BASE }}
+      WP_PAGE_ID: ${{ secrets.WP_PAGE_ID }}
+      WP_USERNAME: ${{ secrets.WP_USERNAME }}
+      WP_APP_PASSWORD: ${{ secrets.WP_APP_PASSWORD }}
+      WP_CONTAINER_ID: ${{ secrets.WP_CONTAINER_ID }}
+      USER_AGENT: IGUV-Weekly-Updater/2.0 (+https://iguv.ch)
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Run updater
+        run: |
+          python - <<'PY'
+          import os, re, sys
+          # Env -> Variablen im Script setzen, ohne Code zu ändern
+          for k in ("WP_BASE","WP_PAGE_ID","WP_USERNAME","WP_APP_PASSWORD","WP_CONTAINER_ID","USER_AGENT"):
+              if os.getenv(k) is None:
+                  print(f"Missing env {k}", file=sys.stderr); sys.exit(2)
+          # Lade den eigentlichen Updater aus updater.py als Text,
+          # überschreibe die Konstanten am Kopf dynamisch:
+          src = open("updater.py","r",encoding="utf-8").read()
+          for key in ("WP_BASE","WP_PAGE_ID","WP_USERNAME","WP_APP_PASSWORD","WP_CONTAINER_ID","USER_AGENT"):
+              pattern = rf'^{key}\s*=\s*.*$'
+              value = os.getenv(key)
+              if key=="WP_BASE": value = f'"{value}".rstrip("/")'
+              elif key=="WP_PAGE_ID": value = str(value)
+              else: value = f'"{value}"'
+              repl = f'{key} = {value}'
+              src = re.sub(pattern, repl, src, flags=re.M)
+          open("updater.runtime.py","w",encoding="utf-8").write(src)
+          # Ausführen:
+          import runpy
+          try:
+              runpy.run_path("updater.runtime.py", run_name="__main__")
+          except SystemExit as e:
+              raise
+          PY
