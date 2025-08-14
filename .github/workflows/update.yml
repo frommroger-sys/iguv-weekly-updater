@@ -1,9 +1,9 @@
 name: IGUV Weekly Website Updater
 
 on:
-  # ▶ Ermöglicht den "Run workflow"-Button in GitHub → Actions
+  # ▶ "Run workflow"-Button in GitHub → Actions
   workflow_dispatch: {}
-  # ⏰ Wöchentlich: Donnerstag 06:00 Uhr Europe/Zurich (entspricht 04:00 UTC)
+  # ⏰ Wöchentlich: Donnerstag 06:00 Europe/Zurich = 04:00 UTC
   schedule:
     - cron: "0 4 * * 4"
 
@@ -13,12 +13,10 @@ jobs:
 
     env:
       TZ: Europe/Zurich
-      # Modell für die Zusammenfassung (Scrape ➜ KI-Summary). Passt zu deinem aktuellen updater.py.
       OPENAI_MODEL: gpt-4o-mini
-      # WordPress Container-ID; falls du sie als Secret pflegst, ersetzt die nächste Zeile durch: ${{ secrets.WP_CONTAINER_ID }}
       WP_CONTAINER_ID: weekly-update-content
 
-      # Secrets (unter Repo → Settings → Secrets and variables → Actions)
+      # Repository Secrets (Repo → Settings → Secrets and variables → Actions)
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       WP_BASE: ${{ secrets.WP_BASE }}
       WP_PAGE_ID: ${{ secrets.WP_PAGE_ID }}
@@ -41,10 +39,12 @@ jobs:
             echo "❌ OPENAI_API_KEY fehlt. Bitte als Repository Secret setzen."
             exit 1
           fi
-          if [ -z "${WP_BASE}" ] || [ -z "${WP_PAGE_ID}" ] || [ -z "${WP_USERNAME}" ] || [ -z "${WP_APP_PASSWORD}" ]; then
-            echo "❌ WP_* ENV unvollständig. Bitte Secrets prüfen."
-            exit 1
-          fi
+          for v in WP_BASE WP_PAGE_ID WP_USERNAME WP_APP_PASSWORD; do
+            if [ -z "$(eval echo \$$v)" ]; then
+              echo "❌ $v fehlt. Bitte als Repository Secret setzen."
+              exit 1
+            fi
+          done
           echo "✅ ENV ok"
 
       - name: Install dependencies
@@ -57,13 +57,10 @@ jobs:
           echo "Starte Weekly Update ..."
           python updater.py
 
-      # Zeigt bei Fehlern hilfreiche Runner-Infos
       - name: Dump diagnostics (on failure)
         if: failure()
         run: |
           echo "=== Python version ==="
           python --version
-          echo "=== PWD ==="
-          pwd
           echo "=== Files ==="
           ls -la
