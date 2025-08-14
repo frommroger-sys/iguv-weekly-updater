@@ -203,4 +203,4 @@ def update_wp(inner_html: str):
     url = f"{WP_BASE}/wp-json/wp/v2/pages/{WP_PAGE_ID}"
     r = requests.post(url, auth=(WP_USERNAME, WP_APP_PASSWORD), json={"content": new_html}, timeout=60)
     if r.status_code not in (200, 201):
-        raise RuntimeError(f"WP UPDATE fehlgeschlagen: {r.stat
+        raise RuntimeError(f"WP UPDATE fehlgeschlagen: {r.status_code} {r.text}")
