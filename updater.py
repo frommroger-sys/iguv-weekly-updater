@@ -16,7 +16,14 @@ WP_APP_PASSWORD  = os.environ.get("WP_APP_PASSWORD", "")
 WP_CONTAINER_ID  = os.environ.get("WP_CONTAINER_ID", "weekly-update-content")
 TZ               = os.environ.get("TZ", "Europe/Zurich")
 
-USER_AGENT = "IGUV-Weekly-Updater/2.0 (+https://iguv.ch)"
+# ========= HTTP-Header/UA (verhindert 403/Caching-Probleme) =========
+USER_AGENT = "Mozilla/5.0 (compatible; IGUV-Weekly-Updater/2.0; +https://iguv.ch)"
+DEFAULT_HEADERS = {
+    "User-Agent": USER_AGENT,
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "de-CH,de;q=0.9,en;q=0.8",
+    "Cache-Control": "no-cache",
+}
 
 # ========= Hilfsfunktionen =========
 def iso_now_local() -> str:
@@ -37,8 +44,14 @@ def require_env():
         raise RuntimeError("Fehlende ENV Variablen: " + ", ".join(missing))
 
 def http_get(url: str, timeout: int = 40) -> requests.Response:
-    headers = {"User-Agent": USER_AGENT}
-    return requests.get(url, headers=headers, timeout=timeout)
+    # simple retry (3 Versuche)
+    last_err = None
+    for attempt in range(3):
+        try:
+            return requests.get(url, headers=DEFAULT_HEADERS, timeout=timeout)
+        except Exception as e:
+            last_err = e
+    raise last_err
 
 def domain(url: str) -> str:
     try:
@@ -145,7 +158,8 @@ def summarize_with_openai(sections_payload: list[dict], max_per_section: int, st
     sys_prompt = (
         "Du bist ein präziser Nachrichten-Editor für Finanz-/Regulierungsthemen in der Schweiz. "
         f"Erstelle pro Sektion maximal {max_per_section} Punkte. "
-        "Jeder Punkt enthält: title, url, date_iso (YYYY-MM-DD; falls None → heutiges Datum), summary (1–2 Sätze; warum relevant). "
+        "Jeder Punkt enthält: title, url, date_iso (YYYY-MM-DD; falls None → heutiges Datum), "
+        "summary (1–2 Sätze; warum relevant). "
         "Gib das Ergebnis als JSON-Objekt {\"sections\":[{\"name\":\"...\",\"items\":[...]}]} zurück."
     )
 
@@ -178,7 +192,7 @@ def to_html(digest: dict, days: int) -> str:
     any_item = False
     for sec in digest.get("sections", []):
         items = sec.get("items", []) or []
-        if not items: 
+        if not items:
             continue
         any_item = True
         parts.append(f'<h3 style="margin-top:1.2em;">{sec.get("name","")}</h3>')
@@ -193,11 +207,12 @@ def to_html(digest: dict, days: int) -> str:
     if not any_item:
         parts.append("<p>Keine relevanten Neuigkeiten in den letzten Tagen.</p>")
     parts.append(f'<hr><p style="font-size:12px;color:#666;">Automatisch erstellt (letzte {days} Tage).</p>')
-    return "\n".join(parts)
+    # In WP-Container einbetten
+    return f'<div id="{WP_CONTAINER_ID}">' + "\n".join(parts) + "</div>"
 
 def fetch_wp_page():
     url = f"{WP_BASE}/wp-json/wp/v2/pages/{WP_PAGE_ID}?context=edit"
-    r = requests.get(url, auth=(WP_USERNAME, WP_APP_PASSWORD), timeout=30, headers={"User-Agent": USER_AGENT})
+    r = requests.get(url, auth=(WP_USERNAME, WP_APP_PASSWORD), timeout=30, headers=DEFAULT_HEADERS)
     if r.status_code != 200:
         raise RuntimeError(f"WP GET fehlgeschlagen: {r.status_code} {r.text}")
     return r.json()
@@ -218,7 +233,7 @@ def update_wp(inner_html: str):
     new_html = replace_container_html(current_html, inner_html)
     url = f"{WP_BASE}/wp-json/wp/v2/pages/{WP_PAGE_ID}"
     r = requests.post(url, auth=(WP_USERNAME, WP_APP_PASSWORD), json={"content": new_html},
-                      timeout=60, headers={"User-Agent": USER_AGENT})
+                      timeout=60, headers=DEFAULT_HEADERS)
     if r.status_code not in (200, 201):
         raise RuntimeError(f"WP UPDATE fehlgeschlagen: {r.status_code} {r.text}")
     return r.json()
