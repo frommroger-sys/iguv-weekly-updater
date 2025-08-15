@@ -1,7 +1,7 @@
 # Zeitfenster (Tage)
 time_window_days: 7
 
-# Globale Keywords (werden pro Sektion überschrieben, falls dort "keywords" gesetzt ist)
+# Globale Keywords – werden pro Sektion übersteuert, falls dort "keywords" gesetzt ist
 keywords:
   - rundschreiben
   - sanktion
@@ -14,12 +14,13 @@ keywords:
   - reglement
   - prüfung
   - faq
+  - vermögensverwalter
 
 summary:
-  style: "Sachlich, prägnant, für Finanzfachleute (Vermögensverwalter)."
+  style: "Kurze, fachliche Zusammenfassung für Vermögensverwalter (Konsequenzen, Fristen, Pflichten)."
 
 sections:
-  # 1) FINMA
+  # 1) FINMA – News + Rundschreiben
   - name: FINMA
     keywords:
       - rundschreiben
@@ -31,15 +32,15 @@ sections:
     sources:
       - url: https://www.finma.ch/de/news/
         include_regex:
-          - "^https://www\\.finma\\.ch/.*/news/\\d{4}/\\d{2}/"   # Datierte News-Artikel
+          - "^https://www\\.finma\\.ch/.*/news/\\d{4}/\\d{2}/"
         require_date: true
       - url: https://www.finma.ch/de/dokumentation/rundschreiben/
         include_regex:
           - "^https://www\\.finma\\.ch/.*/dokumentation/rundschreiben/"
-        require_date: false   # Rundschreiben-Übersichten sind teils undatiert
+        require_date: false
 
-  # 2) Aufsichtsorganisationen (AO)
-  - name: Aufsichtsorganisationen
+  # 2) AO – Gebühren/Reglement/Prüfung/FAQs (inkl. SO-FIT; Korrektur)
+  - name: Aufsichtsorganisationen (AOOS, OSFIN, OAD-FCT, OSIF, SO-FIT)
     keywords:
       - gebühr
       - gebuehr
@@ -65,17 +66,17 @@ sections:
         require_date: false
 
   # 3) Sanktionen / Embargos
-  - name: Sanktionen & Embargos (SECO / OFAC / EU)
+  - name: Embargos & Sanktionen (SECO / OFAC / EU)
     keywords:
       - sanktion
       - embargo
-      - ausserkraftsetzung
-      - gelistete personen
-      - restriktive maßnahmen
       - restriktive massnahmen
+      - restriktive maßnahmen
+      - gelistete personen
+      - sdn
     sources:
       - url: https://www.seco.admin.ch/seco/de/home/Aussenwirtschaftspolitik_Wirtschaftliche_Zusammenarbeit/Wirtschaftsbeziehungen/exportkontrollen-und-sanktionen/sanktionen-embargos.html
-        include_regex: ["sanktions|embargo|ukraine|russ|iran|syr|belarus|north-korea|nordkorea"]
+        include_regex: ["sanktions|embargo|ukraine|russ|iran|syr|belarus|north-korea|nordkorea|irak|moldau|sudan|lebanon|libanon"]
         require_date: false
       - url: https://ofac.treasury.gov/recent-actions
         include_regex: ["recent-actions|sanctions|sdn|press-releases"]
@@ -85,7 +86,7 @@ sections:
         require_date: true
 
   # 4) Branchenstimmung / Verbände
-  - name: Branchenstimmung / Verbände
+  - name: Branchenstimmung (economiesuisse, SwissBanking, VSV-ASG)
     keywords:
       - wirtschaft
       - banken
@@ -96,16 +97,38 @@ sections:
       - aml
     sources:
       - url: https://www.economiesuisse.ch/de/medien
-        include_regex: ["/medien/"]
+        include_regex: ["/medien/","/aktuell/","/artikel/"]
         require_date: true
       - url: https://www.swissbanking.ch/de/medien
-        include_regex: ["/de/medien/"]
+        include_regex: ["/de/medien/","/medien-politik/news/"]
         require_date: true
       - url: https://www.vsv-asg.ch/de/aktuelles
         include_regex: ["/de/aktuelles/","/de/medienmitteilungen/"]
         require_date: true
 
-  # 5) IGUV Events (optional)
+  # 5) Medien-Monitoring: IGUV / InPaSU / VSV-ASG (über eigene Seiten)
+  - name: Medien-Monitoring (IGUV / InPaSU / VSV-ASG)
+    keywords:
+      - iguv
+      - inpasu
+      - vsv
+      - asg
+      - medien
+      - interview
+      - publikation
+      - zitiert
+    sources:
+      - url: https://iguv.ch/news/
+        include_regex: ["/news/","/magazin/","/aktuell/"]
+        require_date: true
+      - url: https://inpasu.ch/   # falls es eine News-Seite gibt, hier präzisieren
+        include_regex: ["/news|/aktuell|/medien"]
+        require_date: true
+      - url: https://www.vsv-asg.ch/de/aktuelles
+        include_regex: ["/de/aktuelles/","/de/medienmitteilungen/"]
+        require_date: true
+
+  # 6) IGUV Events (optional)
   - name: IGUV Events
     sources:
       - url: https://iguv.ch/event/
