@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       fast:
-        description: "FAST mode (core sources only)"
+        description: "FAST mode (nur FINMA/SECO/OFAC)"
         required: false
         default: "false"
   schedule:
@@ -19,16 +19,17 @@ jobs:
 
       # OpenAI
       OPENAI_MODEL: gpt-5
-      USE_OPENAI_WEBSEARCH: "1"   # versucht Websuche; fällt sonst automatisch zurück
+      USE_OPENAI_WEBSEARCH: "1"
       OPENAI_REQUEST_TIMEOUT_S: "90"
 
-      # Safe limits
+      # Limits
       HTTP_TIMEOUT_S: "25"
       HTTP_MAX_RETRIES: "2"
-      MAX_LINKS_PER_SOURCE: "60"
-      MAX_TOTAL_CANDIDATES: "200"
+      MAX_LINKS_PER_SOURCE: "80"
+      MAX_TOTAL_CANDIDATES: "220"
       MAX_ITEMS_PER_SECTION_KI: "5"
       EXPAND_DETAILS: "1"
+      EVENTS_COUNT: "3"
 
       # Secrets
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
