@@ -206,13 +206,17 @@ Themen: Regulierung, Wirtschaftslage, Finanzmarktpolitik.
 Mindestens 1 Update pro Verband, maximal 4 Updates.
 Format: • [Datum] – [Thema] (Link)
 
-Untertitel: Medien-Monitoring
-Regeln:
-Quellen: Finanz- und Wirtschaftspresse, Finews, Finanz und Wirtschaft, Le Temps, andere relevante Fachportale.
-Nur für Vermögensverwalter/Aufsicht/Regulierung relevante Fachartikel.
-Keine Werbung oder PR-Texte.
-Mindestens 1, maximal 4 Updates.
-Format: • [Datum] – [Titel] (Link)
+Untertitel: Medien-Monitoring Regeln (optimierte Fassung):
+Suche nur in folgenden Quellen:
+site:finews.ch
+site:fuw.ch
+site:letemps.ch
+Weitere relevante Fachportale: site:assetmanagement.ch, site:hedgework.de, site:citywire.com (DACH-Editionen)
+Zeitraum: letzte 12 Monate
+Themen: Nur Artikel zu Vermögensverwaltern, FINMA, Aufsichtsorganisationen (AOOS, OSFIN, FINcontrol, OSIF, SO-FIT), Regulierung, Finanzplatz Schweiz.
+Ausschluss: Keine Werbung, Produktankündigungen, PR-Texte oder reine Personalwechsel ohne regulatorischen Bezug.
+Format: • [Datum] – [Beschreibung] (Link)
+ 
 
 Untertitel: Embargos & Sanktionen
 Regeln:
@@ -225,28 +229,32 @@ Je die letzten Updates von SECO, EU und USA.
 Format: • [Datum] – [Beschreibung] (Link)
 
 Untertitel: Next Events
-Regeln:
-Quelle: https://iguv.ch/event/ (nicht /events/).
-Nur zukünftige Termine für Vermögensverwalter und EAM.
-Mindestens 3 maximal 5 Einträge.
-Format: • [Datum, Uhrzeit] – [Titel] – [Ort] (Link)
+Öffne die Seite https://iguv.ch/event/ und analysiere den dortigen Event-Kalender. 
+Lies alle Event-Einträge aus, die in der Zukunft liegen (aktuelles Datum beachten). 
+Extrahiere aus jedem Eintrag:
+1. Datum
+2. Titel der Veranstaltung
+3. Ort
+4. Den direkten Link zur Event-Detailseite
+Gib nur die nächsten 3–5 zukünftigen Termine aus. 
+Format: • [Datum] – [Titel] – [Ort] ([Link])
 
 WICHTIG – AUSGABEFORMAT:
 Gib die gesamte Antwort als valides, schlichtes HTML ohne Inline-Styles aus:
-<h1>Weekly-Updates – Stand: [TT. Monat JJJJ, HH:MM]</h1>
-<h2>FINMA-Updates</h2>
+<h2>Weekly-Updates</h2>
+<h3>FINMA-Updates</h3>
 <ul><li>[Datum] – [Titel] (<a href="URL" target="_blank" rel="noopener">Link</a>)</li>…</ul>
-<h2>AO-Änderungen</h2>
+<h3>AO-Änderungen</h3>
 <ul>…</ul>
-<h2>Parlamentarische Agenda</h2>
+<h3>Parlamentarische Agenda</h3>
 <ul>…</ul>
-<h2>Branchenstimmung (Verbände)</h2>
+<h3>Branchenstimmung</h3>
 <ul>…</ul>
-<h2>Medien-Monitoring</h2>
+<h3>Medien-Monitoring</h3>
 <ul>…</ul>
-<h2>Embargos & Sanktionen</h2>
+<h3>Embargos & Sanktionen</h3>
 <ul>…</ul>
-<h2>Next Events</h2>
+<h3>Next Events</h3>
 <ul>…</ul>
 Keine zusätzlichen Absätze oder Styles.
 """
@@ -282,14 +290,14 @@ def ask_openai_html() -> str:
 
 # ================== Postprocessing: Events anhängen/ersetzen ==================
 def ensure_next_events_section(model_html: str, base_url: str) -> str:
-    """Falls das Modell keine <h2>Next Events</h2>-Sektion erzeugt hat,
+    """Falls das Modell keine <h3>Next Events</h3>-Sektion erzeugt hat,
     oder die Liste leer ist, ergänzen wir sie via Scraper."""
-    has_section = re.search(r"<h2>\s*Next Events\s*</h2>", model_html, re.IGNORECASE) is not None
+    has_section = re.search(r"<h3>\s*Next Events\s*</h3>", model_html, re.IGNORECASE) is not None
     need_append = (not has_section)
 
     if not need_append:
         # Prüfen, ob direkt danach eine UL mit Li kommt
-        after = re.search(r"(<h2>\s*Next Events\s*</h2>)(?P<tail>.*)", model_html, re.IGNORECASE|re.DOTALL)
+        after = re.search(r"(<h3>\s*Next Events\s*</h3>)(?P<tail>.*)", model_html, re.IGNORECASE|re.DOTALL)
         if after:
             tail = after.group("tail")
             # falls keine <li> gefunden → als leer betrachten
@@ -307,7 +315,7 @@ def ensure_next_events_section(model_html: str, base_url: str) -> str:
         return model_html
 
     lines = []
-    lines.append("<h2>Next Events</h2>")
+    lines.append("<h3>Next Events</h3>")
     lines.append("<ul>")
     for e in ev:
         dtxt = e.get("date_iso","")[:10]
@@ -324,7 +332,7 @@ def ensure_next_events_section(model_html: str, base_url: str) -> str:
 
     if has_section:
         # vorhandene (leere) Sektion ersetzen
-        model_html = re.sub(r"(<h2>\s*Next Events\s*</h2>)(\s*<ul>.*?</ul>)?",
+        model_html = re.sub(r"(<h3>\s*Next Events\s*</h3>)(\s*<ul>.*?</ul>)?",
                             "\n".join(lines),
                             model_html, flags=re.IGNORECASE|re.DOTALL)
     else:
