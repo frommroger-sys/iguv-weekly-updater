@@ -2,14 +2,14 @@
 # -*- coding: utf-8 -*-
 
 """
-IGUV Weekly Updater – HTML only (mit erzwungener Websuche via Responses API)
+IGUV Weekly Updater – HTML only (Websuche via Responses API, gpt-5 kompatibel)
 
 Wesentliche Punkte:
-- Modell: gpt-5 (env-override OPENAI_MODEL möglich)
-- Websuche: tools=[{"type":"web_search"}] + tool_choice="required" (erzwingt Nutzung)
-- Strikte Abschnittsregeln: Zeitfenster, min/max Items
-- FINMA inkl. Sanktionen/Embargos; SECO, OFAC, EU; CH-Parlament (Curia Vista); Verbände/Medien (bis 60 Tage)
-- Events-Parser für /event/ robuster (time/datetime, data-*, dt/dd, deutsche Monatsnamen)
+- Modell: gpt-5 (env-override OPENAI_MODEL moeglich)
+- Websuche: tools=[{"type": "web_search"}] (KEIN tool_choice erzwingen; gpt-5 entscheidet auto)
+- Strikte Abschnittsregeln: Zeitfenster, min/max Items (per Prompt vorgegeben)
+- FINMA inkl. Sanktionen/Embargos; SECO, OFAC, EU; CH-Parlament (Curia Vista); Verbaende/Medien (bis 60 Tage)
+- Events-Parser fuer /event/ robuster (time/datetime, data-*, dt/dd, deutsche Monatsnamen)
 - HTML-Ausgabe ohne <b>-Tags, saubere CSS-Fettschrift
 - WordPress-Update via MU-Plugin-Endpoint /wp-json/iguv/v1/weekly (optional X-IGUV-Token)
 """
@@ -33,7 +33,7 @@ WP_API_TOKEN    = os.getenv("WP_API_TOKEN", "")  # optional
 
 EVENTS_COUNT = int(os.getenv("EVENTS_COUNT", "3"))
 
-USER_AGENT = "Mozilla/5.0 (compatible; IGUV-Weekly-Updater/11.0; +https://iguv.ch)"
+USER_AGENT = "Mozilla/5.0 (compatible; IGUV-Weekly-Updater/11.1; +https://iguv.ch)"
 REQ_TIMEOUT = 45
 
 # ================== Helpers ==================
@@ -168,7 +168,7 @@ def fetch_upcoming_iguv_events(base_url: str, n=3) -> List[Dict[str, str]]:
         seen = set()
         for e in sorted(candidates, key=lambda it: it["date_iso"]):
             key = (e["date_iso"], e.get("url",""), e.get("title","")[:80])
-            if key in seen: 
+            if key in seen:
                 continue
             seen.add(key)
             out.append(e)
@@ -210,9 +210,9 @@ def build_messages(events: List[Dict[str,str]]) -> List[Dict[str,str]]:
         ]
     }
     spec = {
-        "task": "Erstelle einen wöchentlichen, belegten Überblick für Schweizer Vermögensverwalter.",
+        "task": "Erstelle einen woechentlichen, belegten Ueberblick fuer Schweizer Vermoegensverwalter.",
         "rules": {
-            "require_web_search": True,
+            "require_web_search": True,  # Hinweis an das Modell (nicht technisch erzwungen)
             "time_windows": {
                 "finma_days": 7,
                 "sanctions_days": 7,
@@ -232,11 +232,11 @@ def build_messages(events: List[Dict[str,str]]) -> List[Dict[str,str]]:
             "language": "Deutsch",
             "sections_order": [
                 "FINMA-Updates",
-                "AO-Änderungen (AOOS, OSFIN, OAD FCT, OSIF, SO-FIT)",
+                "AO-Aenderungen (AOOS, OSFIN, OAD FCT, OSIF, SO-FIT)",
                 "Sanktionen & Embargos (SECO, OFAC, EU)",
-                "Branchenstimmung (Verbände & Medien)",
+                "Branchenstimmung (Verbaende & Medien)",
                 "Parlamentarische Agenda",
-                "Nächste Events"
+                "Naechste Events"
             ],
             "each_item_fields": ["title","url","date_iso","issuer","summary"]
         },
@@ -244,25 +244,25 @@ def build_messages(events: List[Dict[str,str]]) -> List[Dict[str,str]]:
     }
 
     sys = (
-        "Du bist Redakteur für Schweizer Vermögensverwalter. NUTZE ZWINGEND die Websuche (tool web_search). "
+        "Du bist Redakteur fuer Schweizer Vermoegensverwalter. Nutze die Websuche (tool web_search), wann immer aktuelle Fakten benoetigt werden. "
         "Durchsuche FINMA (News, Rundschreiben, Sanktionen & Embargos), SECO, OFAC, EU (inkl. sanctionsmap.eu), "
-        "Verbände/Medien (bis 60 Tage) und CH-Parlament (bis 60 Tage). "
-        "Erzwinge: FINMA≥1, AO≥1, Parlament≥2, alle ≤Max laut Regeln. Nur fachlich relevante Inhalte "
+        "Verbaende/Medien (bis 60 Tage) und CH-Parlament (bis 60 Tage). "
+        "Ziel: FINMA>=1, AO>=1, Parlament>=2, jeweils <=Max laut Regeln. Nur fachlich relevante Inhalte "
         "(Rundschreiben, Aufsichtsmitteilungen, Sanktionslisten/GL/Designations, branchenrelevante Verbands-/Medienberichte, "
-        "parlamentarische Vorstösse zu AML/Sanktionen/Finanzmarkt). "
+        "parlamentarische Vorstoesse zu AML/Sanktionen/Finanzmarkt). "
         "Formatiere AUSSCHLIESSLICH als JSON:\n"
         "{\n"
         '  "briefing":[{"title":"...","url":"..."}],\n'
         '  "sections":[\n'
         '    {"name":"FINMA-Updates","items":[{"title":"...","url":"...","date_iso":"YYYY-MM-DD","issuer":"FINMA","summary":"..."}]},\n'
-        '    {"name":"AO-Änderungen (AOOS, OSFIN, OAD FCT, OSIF, SO-FIT)","items":[{"title":"...","url":"...","date_iso":"YYYY-MM-DD","issuer":"AO","summary":"..."}]},\n'
+        '    {"name":"AO-Aenderungen (AOOS, OSFIN, OAD FCT, OSIF, SO-FIT)","items":[{"title":"...","url":"...","date_iso":"YYYY-MM-DD","issuer":"AO","summary":"..."}]},\n'
         '    {"name":"Sanktionen & Embargos (SECO, OFAC, EU)","items":[{"title":"...","url":"...","date_iso":"YYYY-MM-DD","issuer":"SECO|OFAC|EU|EU-Rat","summary":"..."}]},\n'
-        '    {"name":"Branchenstimmung (Verbände & Medien)","items":[{"title":"...","url":"...","date_iso":"YYYY-MM-DD","issuer":"economiesuisse|SwissBanking|VSV-ASG|IGUV|Medium","summary":"..."}]},\n'
+        '    {"name":"Branchenstimmung (Verbaende & Medien)","items":[{"title":"...","url":"...","date_iso":"YYYY-MM-DD","issuer":"economiesuisse|SwissBanking|VSV-ASG|IGUV|Medium","summary":"..."}]},\n'
         '    {"name":"Parlamentarische Agenda","items":[{"title":"...","url":"...","date_iso":"YYYY-MM-DD","issuer":"Schweizer Parlament","summary":"..."}]},\n'
-        '    {"name":"Nächste Events","items":[{"title":"...","url":"...","date_iso":"YYYY-MM-DD","issuer":"IGUV|InPaSu","summary":""}]}\n'
+        '    {"name":"Naechste Events","items":[{"title":"...","url":"...","date_iso":"YYYY-MM-DD","issuer":"IGUV|InPaSu","summary":""}]}\n'
         "  ]\n"
         "}\n"
-        "Kein Fliesstext außerhalb des JSON. Füge KEIN HTML in die Felder ein."
+        "Kein Fliesstext ausserhalb des JSON. Fuege KEIN HTML in die Felder ein."
     )
     return [
         {"role": "system", "content": sys},
@@ -280,13 +280,13 @@ def call_openai(messages: List[Dict[str,str]]) -> Dict[str, Any]:
         kwargs = dict(model=OPENAI_MODEL, input=messages)
         if tools:
             kwargs["tools"] = tools
-            kwargs["tool_choice"] = "required"  # zwingt tool-Nutzung
+            # WICHTIG: KEIN tool_choice setzen (gpt-5 erlaubt nur 'auto')
         resp = client.responses.create(**kwargs)
 
-        # Diagnostik: versuchen, Tool-Nutzung zu erkennen (best-effort)
+        # Diagnose: best-effort – versuchen, Tool-Nutzung zu erkennen
         try:
             tool_uses = 0
-            # je nach SDK-Struktur defensiv parsen
+            # SDK-Struktur kann variieren; defensiv parsen
             if hasattr(resp, "output") and isinstance(resp.output, list):
                 for block in resp.output:
                     if getattr(block, "type", "") == "tool_call":
@@ -307,7 +307,7 @@ def call_openai(messages: List[Dict[str,str]]) -> Dict[str, Any]:
         data = json.loads(raw)
         if "briefing" not in data: data["briefing"] = []
         if "sections" not in data: data["sections"] = []
-        # Sicherheit: alle Strings säubern
+        # Sicherheit: alle Strings saeubern
         for sec in data.get("sections", []):
             for it in sec.get("items", []) or []:
                 for k in ("title","url","date_iso","issuer","summary"):
@@ -389,12 +389,12 @@ def render_html(digest: Dict[str, Any], events: List[Dict[str,str]]) -> str:
         parts.append("</ul>")
 
     section("FINMA-Updates", "FINMA-Updates")
-    section("AO-Änderungen (AOOS, OSFIN, OAD FCT, OSIF, SO-FIT)", "AO-Änderungen (AOOS, OSFIN, OAD FCT, OSIF, SO-FIT)")
+    section("AO-Aenderungen (AOOS, OSFIN, OAD FCT, OSIF, SO-FIT)", "AO-Aenderungen (AOOS, OSFIN, OAD FCT, OSIF, SO-FIT)")
     section("Sanktionen & Embargos (SECO, OFAC, EU)", "Sanktionen & Embargos (SECO, OFAC, EU)")
-    section("Branchenstimmung (Verbände & Medien)", "Branchenstimmung (Verbände & Medien)")
+    section("Branchenstimmung (Verbaende & Medien)", "Branchenstimmung (Verbaende & Medien)")
     section("Parlamentarische Agenda", "Parlamentarische Agenda")
 
-    parts.append("<h2>Nächste Events</h2>")
+    parts.append("<h2>Naechste Events</h2>")
     parts.append("<ul>")
     if events:
         for e in events[:EVENTS_COUNT]:
@@ -409,10 +409,10 @@ def render_html(digest: Dict[str, Any], events: List[Dict[str,str]]) -> str:
                 head += f' (<a href="{url_txt}" target="_blank" rel="noopener">Link</a>)'
             parts.append(f"<li>{head}</li>")
     else:
-        parts.append("<li>Derzeit keine kommenden Termine veröffentlicht.</li>")
+        parts.append("<li>Derzeit keine kommenden Termine veroeffentlicht.</li>")
     parts.append("</ul>")
 
-    parts.append('<div class="iguv-disclaimer">© IGUV – Alle Rechte vorbehalten. Keine Haftung für die Richtigkeit der Daten; massgebend sind die verlinkten Originalquellen. Zeitfenster: FINMA/SECO/OFAC/EU 7 Tage; Verbände/Parlament bis 60 Tage; Events: nächste Termine.</div>')
+    parts.append('<div class="iguv-disclaimer">© IGUV – Alle Rechte vorbehalten. Keine Haftung fuer die Richtigkeit der Daten; massgebend sind die verlinkten Originalquellen. Zeitfenster: FINMA/SECO/OFAC/EU 7 Tage; Verbaende/Parlament bis 60 Tage; Events: naechste Termine.</div>')
     parts.append("</div>")
     return "\n".join(parts)
 
@@ -447,7 +447,7 @@ def main():
     events = fetch_upcoming_iguv_events(WP_BASE, EVENTS_COUNT)
     print(f"INFO: Events gefunden: {len(events)} (limit={EVENTS_COUNT})")
 
-    print("KI-Zusammenfassung (gpt-5 + erzwungene Websuche) …")
+    print("KI-Zusammenfassung (gpt-5 mit Websuche auto) …")
     messages = build_messages(events)
     digest = call_openai(messages)
 
