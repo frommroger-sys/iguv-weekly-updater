@@ -1,27 +1,113 @@
-# Zeitfenster in Tagen
+# Zeitfenster (Tage)
 time_window_days: 7
 
-# Schlüsselwörter – nur Meldungen, die eines davon enthalten, werden berücksichtigt
+# Globale Keywords (werden pro Sektion überschrieben, falls dort "keywords" gesetzt ist)
 keywords:
-  - finma
-  - aufsichtsorganisation
-  - vermögensverwalter
-  - regulierung
+  - rundschreiben
+  - sanktion
+  - embargo
+  - verordnung
+  - aufsichtsrecht
   - geldwäscherei
-  - sanktionen
+  - aml
+  - gebühr
+  - reglement
+  - prüfung
+  - faq
 
-# Stilhinweis für die KI
 summary:
-  style: "Sachlich, prägnant, für Finanzfachleute."
+  style: "Sachlich, prägnant, für Finanzfachleute (Vermögensverwalter)."
 
-# Sektionen und Quellen
 sections:
+  # 1) FINMA
   - name: FINMA
+    keywords:
+      - rundschreiben
+      - sanktion
+      - verordnung
+      - geldwäscherei
+      - aml
+      - aufsichtsrecht
     sources:
-      - https://www.finma.ch/de/news/
-  - name: SECO
+      - url: https://www.finma.ch/de/news/
+        include_regex:
+          - "^https://www\\.finma\\.ch/.*/news/\\d{4}/\\d{2}/"   # Datierte News-Artikel
+        require_date: true
+      - url: https://www.finma.ch/de/dokumentation/rundschreiben/
+        include_regex:
+          - "^https://www\\.finma\\.ch/.*/dokumentation/rundschreiben/"
+        require_date: false   # Rundschreiben-Übersichten sind teils undatiert
+
+  # 2) Aufsichtsorganisationen (AO)
+  - name: Aufsichtsorganisationen
+    keywords:
+      - gebühr
+      - gebuehr
+      - reglement
+      - prüfung
+      - pruefung
+      - faq
     sources:
-      - https://www.seco.admin.ch/seco/de/home/seco/nsb-news.msg-id-0000.html
-  - name: OFAC (USA)
+      - url: https://www.aoos.ch
+        include_regex: ["reglement|gebuehr|gebühr|pr(ü|ue)fung|faq"]
+        require_date: false
+      - url: https://www.osfin.ch
+        include_regex: ["reglement|gebuehr|gebühr|pr(ü|ue)fung|faq"]
+        require_date: false
+      - url: https://oad-fct.ch
+        include_regex: ["reglement|gebuehr|gebühr|pr(ü|ue)fung|faq"]
+        require_date: false
+      - url: https://www.osif.ch
+        include_regex: ["reglement|gebuehr|gebühr|pr(ü|ue)fung|faq"]
+        require_date: false
+      - url: https://www.so-fit.ch
+        include_regex: ["reglement|gebuehr|gebühr|pr(ü|ue)fung|faq"]
+        require_date: false
+
+  # 3) Sanktionen / Embargos
+  - name: Sanktionen & Embargos (SECO / OFAC / EU)
+    keywords:
+      - sanktion
+      - embargo
+      - ausserkraftsetzung
+      - gelistete personen
+      - restriktive maßnahmen
+      - restriktive massnahmen
     sources:
-      - https://ofac.treasury.gov/recent-actions
+      - url: https://www.seco.admin.ch/seco/de/home/Aussenwirtschaftspolitik_Wirtschaftliche_Zusammenarbeit/Wirtschaftsbeziehungen/exportkontrollen-und-sanktionen/sanktionen-embargos.html
+        include_regex: ["sanktions|embargo|ukraine|russ|iran|syr|belarus|north-korea|nordkorea"]
+        require_date: false
+      - url: https://ofac.treasury.gov/recent-actions
+        include_regex: ["recent-actions|sanctions|sdn|press-releases"]
+        require_date: false
+      - url: https://www.consilium.europa.eu/en/press/press-releases/
+        include_regex: ["/press/press-releases/"]
+        require_date: true
+
+  # 4) Branchenstimmung / Verbände
+  - name: Branchenstimmung / Verbände
+    keywords:
+      - wirtschaft
+      - banken
+      - regulation
+      - regulierung
+      - finanzplatz
+      - sanktion
+      - aml
+    sources:
+      - url: https://www.economiesuisse.ch/de/medien
+        include_regex: ["/medien/"]
+        require_date: true
+      - url: https://www.swissbanking.ch/de/medien
+        include_regex: ["/de/medien/"]
+        require_date: true
+      - url: https://www.vsv-asg.ch/de/aktuelles
+        include_regex: ["/de/aktuelles/","/de/medienmitteilungen/"]
+        require_date: true
+
+  # 5) IGUV Events (optional)
+  - name: IGUV Events
+    sources:
+      - url: https://iguv.ch/event/
+        include_regex: ["/event/"]
+        require_date: false
