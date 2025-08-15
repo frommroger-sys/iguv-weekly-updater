@@ -6,7 +6,7 @@ on:
       fast:
         description: "FAST mode (core sources only)"
         required: false
-        default: "true"
+        default: "false"
   schedule:
     # Thursday 06:00 Europe/Zurich = 04:00 UTC
     - cron: "0 4 * * 4"
@@ -14,27 +14,25 @@ on:
 jobs:
   update:
     runs-on: ubuntu-latest
-
     env:
       TZ: Europe/Zurich
 
-      # Model & safe-mode limits
-      OPENAI_MODEL: gpt-4o-mini
+      # OpenAI
+      OPENAI_MODEL: gpt-5
+      USE_OPENAI_WEBSEARCH: "1"   # versucht Websuche; fällt sonst automatisch zurück
+      OPENAI_REQUEST_TIMEOUT_S: "90"
+
+      # Safe limits
       HTTP_TIMEOUT_S: "25"
       HTTP_MAX_RETRIES: "2"
-      MAX_LINKS_PER_SOURCE: "40"
-      MAX_TOTAL_CANDIDATES: "150"
+      MAX_LINKS_PER_SOURCE: "60"
+      MAX_TOTAL_CANDIDATES: "200"
       MAX_ITEMS_PER_SECTION_KI: "5"
-      OPENAI_REQUEST_TIMEOUT_S: "60"
-
-      # Container handling
-      CONTAINER_STRATEGY: rebuild
-      WP_CONTAINER_ID: weekly-update-content
+      EXPAND_DETAILS: "1"
 
       # Secrets
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       WP_BASE: ${{ secrets.WP_BASE }}
-      WP_PAGE_ID: ${{ secrets.WP_PAGE_ID }}
       WP_USERNAME: ${{ secrets.WP_USERNAME }}
       WP_APP_PASSWORD: ${{ secrets.WP_APP_PASSWORD }}
 
@@ -49,9 +47,8 @@ jobs:
 
       - name: Sanity check
         run: |
-          echo "Model=$OPENAI_MODEL"
-          [ -n "$OPENAI_API_KEY" ] || { echo "OPENAI_API_KEY missing"; exit 1; }
-          for v in WP_BASE WP_PAGE_ID WP_USERNAME WP_APP_PASSWORD; do
+          echo "Model=$OPENAI_MODEL / Websearch=$USE_OPENAI_WEBSEARCH"
+          for v in OPENAI_API_KEY WP_BASE WP_USERNAME WP_APP_PASSWORD; do
             eval val=\$$v
             [ -n "$val" ] || { echo "$v missing"; exit 1; }
           done
