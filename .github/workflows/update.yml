@@ -4,38 +4,36 @@ on:
   workflow_dispatch:
     inputs:
       fast:
-        description: "FAST mode (nur FINMA/SECO/OFAC)"
+        description: "Ignoriert (Websearch ist immer aktiv)"
         required: false
         default: "false"
   schedule:
-    # Thursday 06:00 Europe/Zurich = 04:00 UTC
+    # Donnerstag 06:00 Europe/Zurich = 04:00 UTC
     - cron: "0 4 * * 4"
 
 jobs:
   update:
     runs-on: ubuntu-latest
+
     env:
       TZ: Europe/Zurich
 
       # OpenAI
-      OPENAI_MODEL: gpt-5
-      USE_OPENAI_WEBSEARCH: "1"
+      OPENAI_MODEL: websearch-gpt-5
       OPENAI_REQUEST_TIMEOUT_S: "600"
 
-      # Limits
-      HTTP_TIMEOUT_S: "25"
-      HTTP_MAX_RETRIES: "2"
-      MAX_LINKS_PER_SOURCE: "80"
-      MAX_TOTAL_CANDIDATES: "220"
-      MAX_ITEMS_PER_SECTION_KI: "5"
-      EXPAND_DETAILS: "1"
-      EVENTS_COUNT: "3"
-
-      # Secrets
-      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      # WP / Endpoint
       WP_BASE: ${{ secrets.WP_BASE }}
       WP_USERNAME: ${{ secrets.WP_USERNAME }}
       WP_APP_PASSWORD: ${{ secrets.WP_APP_PASSWORD }}
+      # optionaler Token-Fallback (muss mit WP-Plugin übereinstimmen)
+      WP_API_TOKEN: ${{ secrets.WP_API_TOKEN }}
+
+      # Sichtbarer Log
+      EVENTS_COUNT: "3"
+
+      # Secret
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 
     steps:
       - name: Checkout
@@ -46,31 +44,28 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Sanity check
+      - name: Install dependencies
         run: |
-          echo "Model=$OPENAI_MODEL / Websearch=$USE_OPENAI_WEBSEARCH"
-          for v in OPENAI_API_KEY WP_BASE WP_USERNAME WP_APP_PASSWORD; do
+          python -m pip install --upgrade pip
+          pip install openai==1.99.9 requests==2.32.4 beautifulsoup4==4.13.4 lxml==6.0.0
+
+      - name: Sanity
+        run: |
+          echo "Model: $OPENAI_MODEL"
+          [ -n "$OPENAI_API_KEY" ] || { echo "OPENAI_API_KEY missing"; exit 1; }
+          for v in WP_BASE WP_USERNAME WP_APP_PASSWORD; do
             eval val=\$$v
             [ -n "$val" ] || { echo "$v missing"; exit 1; }
           done
           echo "ENV OK"
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-
-      - name: Run updater
+      - name: Start Weekly Update
         run: |
           echo "Start Weekly Update..."
-          if [ "${{ github.event.inputs.fast }}" = "true" ]; then
-            python updater.py --fast
-          else
-            python updater.py
-          fi
+          python updater.py
 
       - name: Diagnostics on failure
         if: failure()
         run: |
           python --version
-          ls -la
+          pip freeze
