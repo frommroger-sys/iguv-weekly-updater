@@ -1,255 +1,227 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import os, sys, re, json, datetime, traceback, argparse, html
-from urllib.parse import urljoin, urlparse
-from dateutil.tz import gettz
-import yaml
+"""
+IGUV Weekly Updater (HTML only, no PDF)
+- GPT-5 (Responses API) mit optionalem Web-Search
+- Output strikt nach Template: Kurzfassung, FINMA, Sanktionen (SECO/OFAC/EU), Medien-Monitoring, IGUV/InPaSu Events
+- CH-Datumsformat
+- Post an MU-Plugin: /wp-json/iguv/v1/weekly  (JSON { "html": "<...>" })
+"""
+
+import os, sys, json, html, re, traceback
+from datetime import datetime, date
+from typing import Any, Dict, List
 import requests
 from bs4 import BeautifulSoup
 from openai import OpenAI
 
-# ===== ENV =====
-OPENAI_API_KEY   = os.environ.get("OPENAI_API_KEY", "")
-MODEL            = os.environ.get("OPENAI_MODEL", "gpt-5")  # GPT-5 standard
-USE_OPENAI_WEBSEARCH = os.environ.get("USE_OPENAI_WEBSEARCH", "1") in ("1","true","TRUE")
-EVENTS_COUNT     = int(os.environ.get("EVENTS_COUNT", "3"))
+# ====== ENV ======
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+OPENAI_MODEL   = os.getenv("OPENAI_MODEL", "gpt-5")
+USE_WEBSEARCH  = os.getenv("USE_OPENAI_WEBSEARCH", "1") in ("1","true","TRUE")
 
-WP_BASE          = os.environ.get("WP_BASE", "").rstrip("/")
-WP_USERNAME      = os.environ.get("WP_USERNAME", "")
-WP_APP_PASSWORD  = os.environ.get("WP_APP_PASSWORD", "")
+# Request-Timeout für OpenAI (GANZ WICHTIG -> in update.yml auf 600 gesetzt)
+OPENAI_REQUEST_TIMEOUT_S = int(os.getenv("OPENAI_REQUEST_TIMEOUT_S", "600"))
 
-TZ               = os.environ.get("TZ", "Europe/Zurich")
+# WordPress MU-Plugin Endpoint (Application Password Auth)
+WP_BASE         = (os.getenv("WP_BASE", "") or "").rstrip("/")
+WP_USERNAME     = os.getenv("WP_USERNAME", "")
+WP_APP_PASSWORD = os.getenv("WP_APP_PASSWORD", "")
 
-HTTP_TIMEOUT_S   = int(os.environ.get("HTTP_TIMEOUT_S", "25"))
-HTTP_MAX_RETRIES = int(os.environ.get("HTTP_MAX_RETRIES", "2"))
-MAX_LINKS_PER_SOURCE     = int(os.environ.get("MAX_LINKS_PER_SOURCE", "80"))
-MAX_TOTAL_CANDIDATES     = int(os.environ.get("MAX_TOTAL_CANDIDATES", "220"))
-MAX_ITEMS_PER_SECTION_KI = int(os.environ.get("MAX_ITEMS_PER_SECTION_KI", "5"))
-OPENAI_REQUEST_TIMEOUT_S = int(os.environ.get("OPENAI_REQUEST_TIMEOUT_S", "90"))
-EXPAND_DETAILS = os.environ.get("EXPAND_DETAILS", "1") in ("1","true","TRUE")
+# Events-Einstellungen
+EVENTS_COUNT = int(os.getenv("EVENTS_COUNT", "3"))
 
-USER_AGENT = "Mozilla/5.0 (compatible; IGUV-Weekly-Updater/6.0; +https://iguv.ch)"
-HDR_HTML = {"User-Agent": USER_AGENT, "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "de-CH,de;q=0.9,en;q=0.8", "Cache-Control": "no-cache"}
-HDR_JSON = {"User-Agent": USER_AGENT, "Accept": "application/json, text/plain, */*"}
+# HTTP
+USER_AGENT = "Mozilla/5.0 (compatible; IGUV-Weekly-Updater/7.0; +https://iguv.ch)"
+HDR_HTML = {"User-Agent": USER_AGENT, "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"}
+REQ_TIMEOUT = 30
 
-# ===== Helpers =====
-def now_local():
-    return datetime.datetime.now(tz=gettz(TZ))
-
-def ch_date(d: datetime.date) -> str:
-    return d.strftime("%d.%m.%Y")
-
-def domain(u):
-    try: return urlparse(u).netloc
-    except: return ""
-
-def load_yaml(p):
-    with open(p,"r",encoding="utf-8") as f: return yaml.safe_load(f)
-
+# ====== Hilfen ======
 def require_env():
-    miss=[k for k,v in {"OPENAI_API_KEY":OPENAI_API_KEY,"WP_BASE":WP_BASE,"WP_USERNAME":WP_USERNAME,"WP_APP_PASSWORD":WP_APP_PASSWORD}.items() if not v]
-    if miss: raise RuntimeError("Fehlende ENV Variablen: "+", ".join(miss))
+    missing = []
+    for k, v in {
+        "OPENAI_API_KEY": OPENAI_API_KEY,
+        "WP_BASE": WP_BASE,
+        "WP_USERNAME": WP_USERNAME,
+        "WP_APP_PASSWORD": WP_APP_PASSWORD,
+    }.items():
+        if not v:
+            missing.append(k)
+    if missing:
+        raise RuntimeError("Fehlende ENV Variablen: " + ", ".join(missing))
 
-def http_get(u):
-    last=None
-    for _ in range(HTTP_MAX_RETRIES):
-        try: return requests.get(u, headers=HDR_HTML, timeout=HTTP_TIMEOUT_S)
-        except Exception as e: last=e
-    raise last
+def ch_date_str(d: date) -> str:
+    months = ["Januar","Februar","März","April","Mai","Juni",
+              "Juli","August","September","Oktober","November","Dezember"]
+    return f"{d.day}. {months[d.month-1]} {d.year}"
 
-DATE_PATTERNS=[r"(?P<iso>\d{4}-\d{2}-\d{2})", r"(?P<dot>\d{2}\.\d{2}\.\d{4})", r"/(?P<y>\d{4})/(?P<m>\d{2})/"]
-def parse_date_heuristic(s):
-    s=s or ""
-    for pat in DATE_PATTERNS:
-        m=re.search(pat,s)
-        if not m: continue
-        if m.groupdict().get("iso"):
-            try: return datetime.datetime.strptime(m.group("iso"),"%Y-%m-%d").date()
-            except: pass
-        if m.groupdict().get("dot"):
-            try: return datetime.datetime.strptime(m.group("dot"),"%d.%m.%Y").date()
-            except: pass
-        if m.groupdict().get("y") and m.groupdict().get("m"):
-            try: return datetime.date(int(m.group("y")), int(m.group("m")), 1)
-            except: pass
-    return None
-
-def within_days(d,days): return bool(d) and (datetime.date.today()-d)<=datetime.timedelta(days=days)
-def norm(s): return " ".join((s or "").split())
-
-TEXT_BLACKLIST={
-    "home","start","startseite","über uns","ueber uns","about","kontakt","kontaktieren","jobs","karriere","login","anmelden",
-    "impressum","datenschutz","newsletter","faq","häufige fragen","haeufige fragen","downloads","publikationen",
-    "veranstaltungen","events","kalender","sitemap","kontaktformular","media","medien","news","kontaktformular"
-}  # Navigation
-
-# ===== Deep snippet (Kontext) =====
-def extract_snippet(u,max_chars=400):
+def parse_iso_or_empty(s: str) -> str:
+    s = (s or "").strip()
+    if not s: return ""
     try:
-        r=http_get(u)
-        if r.status_code!=200: return ""
-        soup=BeautifulSoup(r.text,"lxml")
-        ctx=soup.find("article") or soup
-        paras=[norm(p.get_text(" ",strip=True)) for p in ctx.find_all("p")]
-        paras=[p for p in paras if len(p)>60][:2]
-        return " ".join(paras)[:max_chars]
-    except: return ""
+        d = datetime.strptime(s[:10], "%Y-%m-%d").date()
+        return ch_date_str(d)
+    except Exception:
+        # eventuell schon CH-Format
+        return s
 
-# ===== Crawl per-Quelle =====
-def extract_from_source(list_url, rule, days, global_kws):
-    print(f" - Quelle abrufen: {list_url}")
-    try: resp=http_get(list_url)
-    except Exception as e: print("   WARN:",repr(e)); return []
-    if resp.status_code!=200: print("   WARN: HTTP",resp.status_code,"bei",list_url); return []
-
-    soup=BeautifulSoup(resp.text,"lxml")
-    include=[re.compile(p,flags=re.I) for p in rule.get("include_regex",[])]
-    exclude_text=[t.lower() for t in rule.get("exclude_text",[])]
-    require_date=bool(rule.get("require_date",True))
-    same_site=rule.get("same_site_only",True)
-    kws=[k.lower() for k in (rule.get("keywords") or global_kws or [])]
-
-    items=[]; base=list_url
-    for i,a in enumerate(soup.find_all("a",href=True)):
-        if i>=MAX_LINKS_PER_SOURCE: break
-        href=urljoin(base,a["href"].strip())
-        text=norm(a.get_text(" ",strip=True))
-        if not text or text.lower() in TEXT_BLACKLIST: continue
-        if same_site and domain(href)!=domain(base): continue
-        if include and not any(rx.search(href) or rx.search(text) for rx in include): continue
-        if exclude_text and any(ex in text.lower() for ex in exclude_text): continue
-
-        blob=(text+" "+href).lower()
-        if kws and not any(k in blob for k in kws): continue
-
-        d=parse_date_heuristic(text) or parse_date_heuristic(href)
-        if require_date and not d: continue
-        if d and not within_days(d,days): continue
-
-        snippet=extract_snippet(href) if EXPAND_DETAILS else ""
-        items.append({
-            "title":text[:240],
-            "url":href,
-            "date": d.isoformat() if d else None,
-            "source":domain(href),
-            "snippet":snippet
-        })
-
-    print(f"   -> {len(items)} Kandidaten nach Filter (max {MAX_LINKS_PER_SOURCE} Links)")
-    return items
-
-# ===== IGUV Events: nächste N ermitteln =====
+# ====== Events (nächste 3 von https://iguv.ch/event/) ======
 DATE_RX = re.compile(r"(\d{1,2})\.(\d{1,2})\.(\d{4})")
-def fetch_upcoming_iguv_events(n=3):
-    url = "https://iguv.ch/event/"
-    out=[]
+def fetch_upcoming_iguv_events(n=3) -> List[Dict[str, str]]:
+    url = f"{WP_BASE}/event/"
+    out: List[Dict[str, str]] = []
     try:
-        r=http_get(url)
-        if r.status_code!=200: return out
-        soup=BeautifulSoup(r.text,"lxml")
-        today=datetime.date.today()
+        r = requests.get(url, headers=HDR_HTML, timeout=REQ_TIMEOUT)
+        r.raise_for_status()
+        soup = BeautifulSoup(r.text, "lxml")
+        today = date.today()
+
+        # Heuristik: Links mit Datum im Text
         for a in soup.find_all("a", href=True):
-            txt=norm(a.get_text(" ",strip=True))
-            m=DATE_RX.search(txt)
-            if not m: continue
-            d=datetime.date(int(m.group(3)), int(m.group(2)), int(m.group(1)))
-            if d < today: continue
+            txt = " ".join((a.get_text(" ", strip=True) or "").split())
+            m = DATE_RX.search(txt)
+            if not m:
+                continue
+            dd, mm, yyyy = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            try:
+                d = date(yyyy, mm, dd)
+            except Exception:
+                continue
+            if d < today:
+                continue
             out.append({
-                "date": d.isoformat(),
+                "date_iso": d.isoformat(),
                 "title": txt[:200],
-                "url": urljoin(url, a["href"])
+                "url": requests.compat.urljoin(url, a["href"])
             })
-        out.sort(key=lambda it: it["date"])
+        out.sort(key=lambda it: it["date_iso"])
     except Exception:
         pass
     return out[:n]
 
-# ===== OpenAI Websearch (Responses API; Fallback still) =====
-def try_openai_websearch_enrich(payload: dict) -> dict:
+# ====== GPT-5 Responses API (mit Websearch) ======
+def build_prompt_json(events: List[Dict[str,str]]) -> str:
     """
-    Versucht, GPT-5 mit integriertem Web-Search zu nutzen.
-    Falls nicht verfügbar/fehlende Rechte → stiller Fallback.
+    Strenger JSON-Auftrag an GPT-5: Liefere validen JSON-Block mit briefing + sections.
     """
+    spec = {
+        "task": "Weekly-Report für unabhängige Vermögensverwalter (Schweiz) – letzte 7 Tage",
+        "must_search_sources": {
+            "FINMA": [
+                "https://www.finma.ch/de/news/",
+                "https://www.finma.ch/de/dokumentation/rundschreiben/"
+            ],
+            "SECO": [
+                "https://www.seco.admin.ch/seco/de/home/Aussenwirtschaftspolitik_Wirtschaftliche_Zusammenarbeit/Wirtschaftsbeziehungen/exportkontrollen-und-sanktionen/sanktionen-embargos.html"
+            ],
+            "OFAC": [
+                "https://ofac.treasury.gov/recent-actions"
+            ],
+            "EU": [
+                "https://www.consilium.europa.eu/en/press/press-releases/"
+            ],
+            "Media": [
+                "https://www.economiesuisse.ch/de/medien",
+                "https://www.swissbanking.ch/de/medien",
+                "https://www.vsv-asg.ch/de/aktuelles",
+                "https://www.finews.ch/",
+                "https://www.handelszeitung.ch/",
+                "https://www.nzz.ch/themen/wirtschaft"
+            ],
+            "IGUV": [
+                "https://iguv.ch/news/",
+                "https://inpasu.ch/news/"
+            ]
+        },
+        "format_requirements": {
+            "language": "Deutsch",
+            "date_format": "YYYY-MM-DD (ich rendere lokal als CH-Datum)",
+            "sections_order": [
+                "FINMA-Updates",
+                "Sanktionen & Embargos (SECO, OFAC, EU)",
+                "Medien-Monitoring",
+                "Nächste IGUV/InPaSu Events"
+            ],
+            "limits": {
+                "max_items_per_section": 5,
+                "briefing_bullets": 5,
+                "briefing_max_words": 18
+            },
+            "each_item_fields": ["title","url","date_iso","issuer","summary"]
+        },
+        "events_hint": events  # wird nur als Kontext mitgegeben (wir rendern diese separat/robust)
+    }
+
+    instructions = (
+        "Du bist ein präziser Redakteur für Schweizer Vermögensverwalter. "
+        "Untersuche gezielt die angegebenen Quellen (FINMA, SECO, OFAC, EU-Rat) sowie Medien/IGUV/InPaSu. "
+        "Liefere NUR konkrete Änderungen/Fristen/Sanktionslisten/Rundschreiben/Pflichten mit Relevanz. "
+        "Gib AUSSCHLIESSLICH einen validen JSON-Block mit folgendem Schema aus:\n\n"
+        "{\n"
+        '  "briefing": [ {"title":"...","url":"..."} ],\n'
+        '  "sections": [\n'
+        '    {"name":"FINMA-Updates","items":[{"title":"...","url":"...","date_iso":"YYYY-MM-DD|","issuer":"FINMA","summary":"..."}]},\n'
+        '    {"name":"Sanktionen & Embargos (SECO, OFAC, EU)","items":[{"title":"...","url":"...","date_iso":"YYYY-MM-DD|","issuer":"SECO|OFAC|EU-Rat","summary":"..."}]},\n'
+        '    {"name":"Medien-Monitoring","items":[{"title":"...","url":"...","date_iso":"YYYY-MM-DD|","issuer":"Medium|IGUV|InPaSu|VSV-ASG","summary":"..."}]},\n'
+        '    {"name":"Nächste IGUV/InPaSu Events","items":[{"title":"...","url":"...","date_iso":"YYYY-MM-DD|","issuer":"IGUV|InPaSu","summary":""}]}\n'
+        "  ]\n"
+        "}\n\n"
+        "KEINE Erklärtexte außerhalb des JSON. Verwende echte, aktuelle Links. "
+        "Falls in einer Sektion nichts Relevantes gefunden wurde, gib für diese Sektion ein leeres items-Array zurück."
+    )
+
+    user = {
+        "role": "user",
+        "content": json.dumps(spec, ensure_ascii=False)
+    }
+    system = {
+        "role": "system",
+        "content": instructions
+    }
+    # Responses API akzeptiert 'input' als Liste von Messages
+    return json.dumps([system, user], ensure_ascii=False)
+
+def call_gpt5_with_websearch(messages_json_ary_str: str) -> Dict[str, Any]:
+    """
+    Ruft die Responses API mit optionalem Web-Search-Tool auf und gibt geparstes JSON zurück.
+    """
+    client = OpenAI(api_key=OPENAI_API_KEY, timeout=OPENAI_REQUEST_TIMEOUT_S)
+    tools = [{"type": "web_search"}] if USE_WEBSEARCH else []
+
+    # messages_json_ary_str := JSON-Array von {role, content}
+    messages = json.loads(messages_json_ary_str)
+
     try:
-        client = OpenAI(api_key=OPENAI_API_KEY, timeout=OPENAI_REQUEST_TIMEOUT_S)
-        instructions = (
-            "Du erstellst ein Weekly für Schweizer Vermögensverwalter. "
-            "Nutze 'web_search' gezielt, um unklare Punkte zu präzisieren und neue Funde zu ergänzen "
-            "(SECO/FINMA/OFAC/EU, AOOS/OSFIN/OAD-FCT/OSIF/SO-FIT, economiesuisse/SwissBanking/VSV-ASG, "
-            "Medienberichte CH/DE/EN, IGUV/InPaSU). "
-            "Nur konkrete Änderungen/Fristen/Listenupdates/Rundschreiben, kein Marketing. "
-            "JSON zurückgeben: {"
-            "\"briefing\":[{\"title\":\"..\",\"url\":\"..\"}],"
-            "\"sections\":[{\"name\":\"..\",\"items\":[{\"title\":\"..\",\"url\":\"..\",\"date_iso\":\"YYYY-MM-DD|\",\"issuer\":\"..\",\"summary\":\"..\"}]}]}"
-        )
         resp = client.responses.create(
-            model=MODEL,
-            input=[{"role":"system","content":instructions},
-                   {"role":"user","content":json.dumps(payload, ensure_ascii=False)}],
-            tools=[{"type":"web_search"}],
+            model=OPENAI_MODEL,
+            input=messages,           # Liste von Rollen-Nachrichten
+            tools=tools               # aktiviert Websearch (falls accountseitig verfügbar)
+            # KEINE temperature setzen (gpt-5 akzeptiert nur default)
         )
-        txt = getattr(resp, "output_text", None) or ""
-        return json.loads(txt) if txt else {}
+        raw = getattr(resp, "output_text", "") or ""
     except Exception as e:
         print("Websearch nicht genutzt (Fallback):", repr(e))
-        return {}
+        return {"briefing": [], "sections": []}
 
-# ===== OpenAI (Chat Completions Fallback) =====
-def summarize_with_openai(sections_payload, max_per_section, style, extra_events):
-    client=OpenAI(api_key=OPENAI_API_KEY, timeout=OPENAI_REQUEST_TIMEOUT_S)
+    raw = (raw or "").strip()
+    # Der Assistent SOLL ausschließlich JSON liefern; robust parsen:
+    try:
+        # Falls der Assistent doch Text um den JSON legt, den inneren JSON-Block extrahieren
+        start = raw.find("{")
+        end   = raw.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            raw = raw[start:end+1]
+        data = json.loads(raw)
+        # Minimal validieren
+        if "briefing" not in data: data["briefing"] = []
+        if "sections" not in data: data["sections"] = []
+        return data
+    except Exception as e:
+        print("WARN: KI-Output kein valider JSON. Rohtext (Anfang):", raw[:500])
+        return {"briefing": [], "sections": []}
 
-    # Deckeln
-    capped=[]; total=0
-    for sec in sections_payload:
-        cand=sec.get("candidates",[])[:80]
-        capped.append({"name":sec.get("name","Sektion"),"candidates":cand})
-        total+=len(cand)
-        if total>=MAX_TOTAL_CANDIDATES: break
-
-    sys_prompt=(
-        "Erstelle ein strukturiertes Weekly für Schweizer Vermögensverwalter (Deutsch, CH-Datum).\n"
-        "Sektionen: Kurzfassung (4–5 Punkte), FINMA (Regulatorik), Embargos & Sanktionen (SECO/OFAC/EU), "
-        "Branchenstimmung (Verbände), Medien-Monitoring (IGUV/InPaSU/VSV-ASG + relevante Medien), IGUV-Events (nächste Termine).\n"
-        "Für jede Meldung: issuer (FINMA, SECO, OFAC, EU-Rat, AOOS, OSFIN, OAD-FCT, OSIF, SO-FIT, economiesuisse, "
-        "SwissBanking, VSV-ASG, IGUV, InPaSU, Medium), date_iso (falls wirklich datiert), title (konkret), url, "
-        "summary (max. 2 Sätze, direkt Nutzen/Frist/Änderung nennen). Keine Floskeln.\n"
-        "Kurzfassung: 4–5 Bullets à max. 18 Wörter, jeweils mit Link.\n"
-        "Gib ein JSON zurück: {\"briefing\":[...],\"sections\":[{\"name\":\"..\",\"items\":[{\"title\":\"..\",\"url\":\"..\","
-        "\"date_iso\":\"YYYY-MM-DD|\",\"issuer\":\"..\",\"summary\":\"..\"}]}]}"
-    )
-    user_payload={
-        "generated_at":now_local().strftime("%Y-%m-%d %H:%M"),
-        "style":style,
-        "sections":capped,
-        "iguv_events": extra_events,
-    }
-
-    # Web-Search versuchen
-    if USE_OPENAI_WEBSEARCH:
-        enriched = try_openai_websearch_enrich(user_payload)
-        if enriched.get("sections") or enriched.get("briefing"):
-            return enriched
-
-    # Chat Completions – bei GPT-5 KEINE temperature senden
-    params = {
-        "model": MODEL,
-        "response_format": {"type":"json_object"},
-        "messages": [
-            {"role":"system","content":sys_prompt},
-            {"role":"user","content":json.dumps(user_payload,ensure_ascii=False)}
-        ],
-    }
-    if not MODEL.startswith("gpt-5"):
-        params["temperature"] = 0.15
-
-    out=client.chat.completions.create(**params)
-    txt=out.choices[0].message.content
-    try: return json.loads(txt)
-    except: print("WARN: KI-JSON fehlgeschlagen:",(txt or "")[:600]); return {"briefing":[],"sections":[]}
-
-# ===== HTML =====
+# ====== HTML Rendering ======
 CSS = """
 <style>
 .iguv-weekly{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;color:#111;line-height:1.55;font-size:16px}
@@ -264,145 +236,148 @@ CSS = """
 </style>
 """
 
-def to_html(digest, days:int)->str:
-    dt=now_local()
-    parts=[CSS,'<div class="iguv-weekly">','<h1>Weekly-Updates</h1>',
-           f'<div class="meta">Stand: {html.escape(dt.strftime("%d.%m.%Y %H:%M"))}</div>']
+def to_html(digest: Dict[str, Any], events: List[Dict[str,str]]) -> str:
+    """
+    Rendert strukturiertes HTML analog PDF-Vorlage.
+    - Briefing (4–5 Punkte)
+    - FINMA-Updates
+    - Sanktionen & Embargos (SECO, OFAC, EU)
+    - Medien-Monitoring
+    - Nächste IGUV/InPaSu Events (max 3, robust aus events-Argument)
+    """
+    dt = datetime.now()
+    parts = [
+        CSS,
+        '<div class="iguv-weekly">',
+        '<h1>Weekly-Updates</h1>',
+        f'<div class="meta">Stand: {html.escape(ch_date_str(dt.date()))}</div>'
+    ]
 
     # Kurzfassung
-    briefing=digest.get("briefing") or []
+    briefing = digest.get("briefing") or []
     if briefing:
         parts.append('<div class="iguv-note"><strong>Kurzfassung (4–5 Punkte):</strong><ul>')
         for b in briefing[:5]:
-            t=html.escape(b.get("title","").strip()); u=html.escape(b.get("url","").strip())
-            parts.append(f'<li><a href="{u}" target="_blank" rel="noopener">{t}</a></li>')
-        parts.append('</ul></div>')
+            if isinstance(b, dict):
+                t = html.escape((b.get("title") or "").strip())
+                u = html.escape((b.get("url") or "").strip())
+                if t and u:
+                    parts.append(f'<li><a href="{u}" target="_blank" rel="noopener">{t}</a></li>')
+                elif t:
+                    parts.append(f'<li>{t}</li>')
+                elif u:
+                    parts.append(f'<li><a href="{u}" target="_blank" rel="noopener">{u}</a></li>')
+            else:
+                # Falls mal nur String kommt
+                t = html.escape(str(b).strip())
+                if t:
+                    parts.append(f"<li>{t}</li>")
+        parts.append("</ul></div>")
 
-    # Sektionen
-    any_item=False
-    for sec in digest.get("sections", []):
-        name = sec.get("name","")
-        items=sec.get("items",[]) or []
-        if not items and "Event" not in name:  # Events können leer sein → überspringen
-            continue
-        any_item = any_item or bool(items)
-        parts.append(f'<h2>{html.escape(name)}</h2>')
-        if "Event" in name:
-            # Erwarte Liste: [{"date":"YYYY-MM-DD","title":"..","url":".."}]
-            parts.append("<ul>")
-            for it in items[:EVENTS_COUNT]:
-                d_iso=(it.get("date") or "")[:10]
-                d_txt=""
-                if d_iso:
-                    try:
-                        d=datetime.datetime.strptime(d_iso,"%Y-%m-%d").date()
-                        d_txt=f"<strong>{ch_date(d)}</strong> – "
-                    except: pass
-                t=html.escape(it.get("title","").strip())
-                u=html.escape(it.get("url","").strip())
-                parts.append(f'<li>{d_txt}<a href="{u}" target="_blank" rel="noopener">{t}</a></li>')
-            parts.append("</ul>")
-            continue
-
+    # Helper zum Rendern normaler Sektionen
+    def render_section(title: str, items: List[Dict[str,Any]]):
+        parts.append(f"<h2>{html.escape(title)}</h2>")
+        if not items:
+            parts.append("<ul><li>Keine neuen, relevanten Meldungen in den letzten 7 Tagen.</li></ul>")
+            return
         parts.append("<ul>")
-        for it in items:
-            date_iso=(it.get("date_iso") or "").strip()
-            issuer = it.get("issuer","").strip()
-            d_txt=""
-            if date_iso:
-                try:
-                    d=datetime.datetime.strptime(date_iso[:10],"%Y-%m-%d").date()
-                    d_txt=f"<strong>{ch_date(d)}</strong> – "
-                except: pass
-            issuer_txt = f' <span class="issuer">({html.escape(issuer)})</span>' if issuer else ""
-            t=html.escape(it.get("title","").strip())
-            u=html.escape(it.get("url","").strip())
-            s=html.escape(it.get("summary","").strip())
-            parts.append(f'<li>{d_txt}<a href="{u}" target="_blank" rel="noopener">{t}</a>{issuer_txt}. {s}</li>')
+        for it in items[:5]:
+            if isinstance(it, dict):
+                title_txt = html.escape((it.get("title") or "").strip())
+                url_txt   = html.escape((it.get("url") or "").strip())
+                issuer    = html.escape((it.get("issuer") or "").strip())
+                date_iso  = (it.get("date_iso") or "").strip()
+                date_txt  = parse_iso_or_empty(date_iso)
+                summary   = html.escape((it.get("summary") or "").strip())
+            else:
+                # robust fallback
+                title_txt = html.escape(str(it).strip())
+                url_txt = issuer = date_txt = summary = ""
+
+            head = ""
+            if date_txt:
+                head += f"<strong>{date_txt}</strong> – "
+            head += title_txt if title_txt else "(ohne Titel)"
+            if issuer:
+                head += f' <span class="issuer">({issuer})</span>'
+
+            line = f"<li>{head}"
+            if url_txt:
+                line += f' (<a href="{url_txt}" target="_blank" rel="noopener">Quelle</a>)'
+            if summary:
+                line += f"<br>{summary}"
+            line += "</li>"
+            parts.append(line)
         parts.append("</ul>")
 
-    if not any_item:
-        parts.append('<p>Keine relevanten Neuigkeiten in den letzten Tagen.</p>')
+    # Sektionen in gewünschter Reihenfolge
+    sec_map = { (s.get("name") or "").strip(): s.get("items") or [] for s in (digest.get("sections") or []) }
 
-    parts.append(f'<div class="iguv-disclaimer">Massgebend sind die verlinkten Originalquellen. Zeitraum: letzte {days} Tage. IGUV-Events: nächste {EVENTS_COUNT} Termine.</div>')
+    render_section("FINMA-Updates", sec_map.get("FINMA-Updates", []))
+    render_section("Sanktionen & Embargos (SECO, OFAC, EU)", sec_map.get("Sanktionen & Embargos (SECO, OFAC, EU)", []))
+    render_section("Medien-Monitoring", sec_map.get("Medien-Monitoring", []))
+
+    # Events (verwende robust die lokal ermittelten)
+    parts.append("<h2>Nächste IGUV/InPaSu Events</h2>")
+    parts.append("<ul>")
+    if events:
+        for e in events[:EVENTS_COUNT]:
+            title_txt = html.escape((e.get("title") or "").strip())
+            url_txt   = html.escape((e.get("url") or "").strip())
+            d_txt = parse_iso_or_empty(e.get("date_iso") or "")
+            head = ""
+            if d_txt:
+                head += f"<strong>{d_txt}</strong> – "
+            head += title_txt if title_txt else "(Event)"
+            if url_txt:
+                head += f' (<a href="{url_txt}" target="_blank" rel="noopener">Link</a>)'
+            parts.append(f"<li>{head}</li>")
+    else:
+        parts.append("<li>Derzeit keine kommenden Termine veröffentlicht.</li>")
+    parts.append("</ul>")
+
+    parts.append('<div class="iguv-disclaimer">Massgebend sind die verlinkten Originalquellen. Zeitraum: letzte 7 Tage. IGUV-Events: nächste Termine.</div>')
     parts.append("</div>")
     return "\n".join(parts)
 
-# ===== MU-Plugin Endpoint =====
-def post_to_mu_plugin(html_inner:str):
-    url=f"{WP_BASE}/wp-json/iguv/v1/weekly"
+# ====== MU-Plugin Endpoint ======
+def post_to_mu_plugin(html_inner: str):
+    url = f"{WP_BASE}/wp-json/iguv/v1/weekly"
     print(f"WordPress (MU-Plugin) aktualisieren: {url}")
-    r=requests.post(url, auth=(WP_USERNAME,WP_APP_PASSWORD),
-                    json={"html":html_inner.strip()}, timeout=HTTP_TIMEOUT_S, headers=HDR_JSON)
-    if r.status_code not in (200,201):
+    r = requests.post(url, auth=(WP_USERNAME, WP_APP_PASSWORD),
+                      json={"html": html_inner.strip()}, timeout=REQ_TIMEOUT,
+                      headers={"User-Agent": USER_AGENT, "Accept":"application/json"})
+    if r.status_code not in (200, 201):
         raise RuntimeError(f"Endpoint-Update fehlgeschlagen: {r.status_code} {r.text}")
     print("SUCCESS: Weekly HTML via Endpoint gesetzt.")
 
-# ===== Main =====
+# ====== MAIN ======
 def main():
     print("== IGUV/INPASU Weekly Updater startet ==")
     require_env()
-    cfg=load_yaml("data_sources.yaml")
 
-    parser=argparse.ArgumentParser()
-    parser.add_argument("--fast",action="store_true",help="Nur FINMA/SECO/OFAC")
-    args=parser.parse_args()
-
-    sections_cfg=cfg.get("sections",[])
-    if args.fast:
-        core={"finma.ch","seco.admin.ch","ofac.treasury.gov"}
-        fast=[]
-        for sec in sections_cfg:
-            rules=[]
-            for src in sec.get("sources",[]):
-                u=src["url"] if isinstance(src,dict) else src
-                if any(d in domain(u) for d in core):
-                    rules.append(src)
-            if rules: fast.append({"name":sec["name"],"sources":rules,"keywords":sec.get("keywords")})
-        sections_cfg=fast
-        print(f"FAST-Modus aktiv: {len(sections_cfg)} Sektionen")
-
-    days=int(cfg.get("time_window_days",7))
-    global_kws=[k.lower() for k in (cfg.get("keywords") or [])]
-    style=cfg.get("summary",{}).get("style","Sachlich, prägnant.")
-
-    print("Quellen scannen …")
-    sections_payload=[]; total=0
-    for block in sections_cfg:
-        name=block.get("name","Sektion")
-        per_kws=[k.lower() for k in (block.get("keywords") or [])] or global_kws
-        cand=[]
-        for src in block.get("sources",[]):
-            if total>=MAX_TOTAL_CANDIDATES: break
-            rule=dict(url=src) if isinstance(src,str) else dict(src)
-            url=rule.get("url")
-            if not url: continue
-            items=extract_from_source(url, rule, days, per_kws)
-            room=MAX_TOTAL_CANDIDATES-total
-            items=items[:room]; total+=len(items); cand.extend(items)
-        cand.sort(key=lambda it: it.get("date") or "", reverse=True)
-        sections_payload.append({"name":name,"candidates":cand})
-
-    print(f"Gesamt-Kandidaten: {total} / Limit {MAX_TOTAL_CANDIDATES}")
-
-    # IGUV-Events (nächste 3)
+    # 1) Events vorab lokal sammeln (robust)
     events = fetch_upcoming_iguv_events(EVENTS_COUNT)
-    if events:
-        sections_payload.append({"name":"IGUV Events","candidates":[{"title":e["title"],"url":e["url"],"date":e["date"],"source":"iguv.ch"} for e in events]})
 
-    print("KI-Zusammenfassung …")
-    digest=summarize_with_openai(sections_payload, MAX_ITEMS_PER_SECTION_KI, style, extra_events=events)
-    total_items=sum(len(s.get("items",[])) for s in digest.get("sections",[]))
-    print(f"Relevante Meldungen nach KI: {total_items}")
+    # 2) GPT-5 Responses API mit Web-Search
+    print("KI-Zusammenfassung (GPT-5 + Websearch) …")
+    messages_json_ary = build_prompt_json(events)
+    digest = call_gpt5_with_websearch(messages_json_ary)
 
+    # 3) HTML rendern
     print("HTML generieren …")
-    html_inner=to_html(digest, days)
+    html_content = to_html(digest, events)
 
+    # 4) In WordPress via MU-Plugin schreiben
     print("WordPress aktualisieren …")
-    post_to_mu_plugin(html_inner)
+    post_to_mu_plugin(html_content)
+
     print("== Fertig ==")
 
-if __name__=="__main__":
-    try: main()
+if __name__ == "__main__":
+    try:
+        main()
     except Exception as e:
-        print("ERROR:",repr(e)); traceback.print_exc(); sys.exit(2)
+        print("ERROR:", repr(e))
+        traceback.print_exc()
+        sys.exit(2)
