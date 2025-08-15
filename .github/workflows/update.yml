@@ -2,11 +2,6 @@ name: IGUV Weekly Website Updater
 
 on:
   workflow_dispatch:
-    inputs:
-      fast:
-        description: "Ignoriert (Websearch ist immer aktiv)"
-        required: false
-        default: "false"
   schedule:
     # Donnerstag 06:00 Europe/Zurich = 04:00 UTC
     - cron: "0 4 * * 4"
@@ -19,17 +14,16 @@ jobs:
       TZ: Europe/Zurich
 
       # OpenAI
-      OPENAI_MODEL: websearch-gpt-5
+      OPENAI_MODEL: gpt-5
+      USE_OPENAI_WEBSEARCH: "1"
       OPENAI_REQUEST_TIMEOUT_S: "600"
 
       # WP / Endpoint
       WP_BASE: ${{ secrets.WP_BASE }}
       WP_USERNAME: ${{ secrets.WP_USERNAME }}
       WP_APP_PASSWORD: ${{ secrets.WP_APP_PASSWORD }}
-      # optionaler Token-Fallback (muss mit WP-Plugin übereinstimmen)
-      WP_API_TOKEN: ${{ secrets.WP_API_TOKEN }}
+      WP_API_TOKEN: ${{ secrets.WP_API_TOKEN }}  # optional
 
-      # Sichtbarer Log
       EVENTS_COUNT: "3"
 
       # Secret
