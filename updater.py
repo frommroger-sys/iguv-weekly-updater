@@ -11,7 +11,8 @@ from openai import OpenAI
 
 # ===== ENV =====
 OPENAI_API_KEY   = os.environ.get("OPENAI_API_KEY", "")
-MODEL            = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+MODEL            = os.environ.get("OPENAI_MODEL", "gpt-5")  # GPT-5 standard
+USE_OPENAI_WEBSEARCH = os.environ.get("USE_OPENAI_WEBSEARCH", "1") in ("1","true","TRUE")
 
 WP_BASE          = os.environ.get("WP_BASE", "").rstrip("/")
 WP_USERNAME      = os.environ.get("WP_USERNAME", "")
@@ -24,10 +25,10 @@ HTTP_MAX_RETRIES = int(os.environ.get("HTTP_MAX_RETRIES", "2"))
 MAX_LINKS_PER_SOURCE     = int(os.environ.get("MAX_LINKS_PER_SOURCE", "60"))
 MAX_TOTAL_CANDIDATES     = int(os.environ.get("MAX_TOTAL_CANDIDATES", "200"))
 MAX_ITEMS_PER_SECTION_KI = int(os.environ.get("MAX_ITEMS_PER_SECTION_KI", "5"))
-OPENAI_REQUEST_TIMEOUT_S = int(os.environ.get("OPENAI_REQUEST_TIMEOUT_S", "60"))
+OPENAI_REQUEST_TIMEOUT_S = int(os.environ.get("OPENAI_REQUEST_TIMEOUT_S", "90"))
 EXPAND_DETAILS = os.environ.get("EXPAND_DETAILS", "1") in ("1","true","TRUE")
 
-USER_AGENT = "Mozilla/5.0 (compatible; IGUV-Weekly-Updater/4.1; +https://iguv.ch)"
+USER_AGENT = "Mozilla/5.0 (compatible; IGUV-Weekly-Updater/5.0; +https://iguv.ch)"
 HDR_HTML = {"User-Agent": USER_AGENT, "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "de-CH,de;q=0.9,en;q=0.8", "Cache-Control": "no-cache"}
 HDR_JSON = {"User-Agent": USER_AGENT, "Accept": "application/json, text/plain, */*"}
@@ -35,21 +36,28 @@ HDR_JSON = {"User-Agent": USER_AGENT, "Accept": "application/json, text/plain, *
 # ===== Helpers =====
 def now_local():
     return datetime.datetime.now(tz=gettz(TZ))
-def ch_date(d): return d.strftime("%d.%m.%Y")
+
+def ch_date(d: datetime.date) -> str:
+    return d.strftime("%d.%m.%Y")
+
 def domain(u): 
     try: return urlparse(u).netloc
     except: return ""
+
 def load_yaml(p): 
     with open(p,"r",encoding="utf-8") as f: return yaml.safe_load(f)
+
 def require_env():
     miss=[k for k,v in {"OPENAI_API_KEY":OPENAI_API_KEY,"WP_BASE":WP_BASE,"WP_USERNAME":WP_USERNAME,"WP_APP_PASSWORD":WP_APP_PASSWORD}.items() if not v]
     if miss: raise RuntimeError("Fehlende ENV Variablen: "+", ".join(miss))
+
 def http_get(u):
     last=None
     for _ in range(HTTP_MAX_RETRIES):
         try: return requests.get(u, headers=HDR_HTML, timeout=HTTP_TIMEOUT_S)
         except Exception as e: last=e
     raise last
+
 DATE_PATTERNS=[r"(?P<iso>\d{4}-\d{2}-\d{2})", r"(?P<dot>\d{2}\.\d{2}\.\d{4})", r"/(?P<y>\d{4})/(?P<m>\d{2})/"]
 def parse_date_heuristic(s):
     s=s or ""
@@ -66,6 +74,7 @@ def parse_date_heuristic(s):
             try: return datetime.date(int(m.group("y")), int(m.group("m")), 1)
             except: pass
     return None
+
 def within_days(d,days): return bool(d) and (datetime.date.today()-d)<=datetime.timedelta(days=days)
 def norm(s): return " ".join((s or "").split())
 
@@ -73,8 +82,8 @@ TEXT_BLACKLIST={"home","start","startseite","über uns","ueber uns","about","kon
                 "impressum","datenschutz","newsletter","faq","häufige fragen","haeufige fragen","downloads","publikationen","veranstaltungen",
                 "events","kalender","sitemap","kontaktformular","media","medien","news"}  # Navigation
 
-# ===== Deep snippet for better summaries =====
-def extract_snippet(u,max_chars=320):
+# ===== Deep snippet (zur Kontextverbesserung) =====
+def extract_snippet(u,max_chars=350):
     try:
         r=http_get(u)
         if r.status_code!=200: return ""
@@ -117,15 +126,51 @@ def extract_from_source(list_url, rule, days, global_kws):
         if d and not within_days(d,days): continue
 
         snippet=extract_snippet(href) if EXPAND_DETAILS else ""
-        items.append({"title":text[:240], "url":href, "date": d.isoformat() if d else None,
-                      "source":domain(href), "snippet":snippet})
+        items.append({
+            "title":text[:240],
+            "url":href,
+            "date": d.isoformat() if d else None,
+            "source":domain(href),
+            "snippet":snippet
+        })
 
     print(f"   -> {len(items)} Kandidaten nach Filter (max {MAX_LINKS_PER_SOURCE} Links)")
     return items
 
-# ===== OpenAI (Briefing + Items) =====
+# ===== OpenAI: optionaler Websearch-Versuch (Responses API) =====
+def try_openai_websearch_enrich(payload: dict) -> dict:
+    """
+    Versucht, GPT-5 mit integriertem Web-Search zu nutzen.
+    Fällt bei 4xx/Feature-Errors still auf normalen Modus zurück.
+    """
+    try:
+        client = OpenAI(api_key=OPENAI_API_KEY, timeout=OPENAI_REQUEST_TIMEOUT_S)
+        instructions = (
+            "Führe bei Bedarf kurze Webrecherchen durch (web_search), um unklare Punkte zu präzisieren: "
+            "Issuer (z.B. FINMA/SECO/OFAC/EU/AO), konkrete Änderung, betroffene Pflichten/Fristen. "
+            "Gib ein JSON zurück: {"
+            '"briefing":[{"title":"..","url":".."}],'
+            '"sections":[{"name":"..","items":[{"title":"..","url":"..","date_iso":"YYYY-MM-DD|","issuer":"..","summary":".."}]}]}'
+        )
+        # Responses API mit tools=[web_search] (verfügbar, falls für Account freigeschaltet)
+        resp = client.responses.create(
+            model=MODEL,
+            input=[{"role":"system","content":instructions},
+                   {"role":"user","content":json.dumps(payload, ensure_ascii=False)}],
+            tools=[{"type":"web_search"}],
+            response_format={"type":"json_object"},
+            temperature=0.15,
+        )
+        txt = resp.output_text
+        return json.loads(txt)
+    except Exception as e:
+        print("Websearch nicht genutzt (Fallback):", repr(e))
+        return {}
+
+# ===== OpenAI (Fallback: Chat Completions) =====
 def summarize_with_openai(sections_payload, max_per_section, style):
     client=OpenAI(api_key=OPENAI_API_KEY, timeout=OPENAI_REQUEST_TIMEOUT_S)
+    # Deckeln
     capped=[]; total=0
     for sec in sections_payload:
         cand=sec.get("candidates",[])[:60]
@@ -135,14 +180,21 @@ def summarize_with_openai(sections_payload, max_per_section, style):
 
     sys_prompt=(
         "Du erstellst für Schweizer Vermögensverwalter ein Weekly mit Kurzfassung und Sektionen.\n"
-        "- Nenne nur wirklich relevante Änderungen (Sanktionen, Fristen, Rundschreiben, AO-Reglemente/Gebühren/Prüfungen).\n"
-        "- Vermeide generische Beschreibungen, fokussiere konkrete News.\n"
-        "- Nutze 'snippet' als Kontext.\n"
+        "- Nur konkrete Änderungen (Sanktionen, Fristen, Rundschreiben, AO-Reglemente/Gebühren/Prüfungen, Medienmitteilungen mit Relevanz).\n"
+        "- Jede Meldung mit 'issuer' (z.B. FINMA, SECO, OFAC, EU-Rat, AOOS, OSFIN, OAD-FCT, OSIF, SO-FIT, economiesuisse, SwissBanking, VSV-ASG, IGUV, InPaSU).\n"
+        "- 'date_iso' nur setzen, wenn tatsächlich vorhanden.\n"
         "- Kurzfassung: 4–5 Bullets, je max. 20 Wörter, mit Link.\n"
-        "Gib ein JSON: {\"briefing\":[{\"title\":\"..\",\"url\":\"..\"}],\n"
-        "\"sections\":[{\"name\":\"..\",\"items\":[{\"title\":\"..\",\"url\":\"..\",\"date_iso\":\"YYYY-MM-DD|\" ,\"summary\":\"..\"}]}]}\n"
+        "Gib ein JSON: {\"briefing\":[{\"title\":\"..\",\"url\":\"..\"}],"
+        "\"sections\":[{\"name\":\"..\",\"items\":[{\"title\":\"..\",\"url\":\"..\",\"date_iso\":\"YYYY-MM-DD|\","
+        "\"issuer\":\"..\",\"summary\":\"..\"}]}]}"
     )
     user_payload={"generated_at":now_local().strftime("%Y-%m-%d %H:%M"),"style":style,"sections":capped}
+
+    # Optional: erst Websearch versuchen
+    if USE_OPENAI_WEBSEARCH:
+        enriched = try_openai_websearch_enrich(user_payload)
+        if enriched.get("sections") or enriched.get("briefing"):
+            return enriched
 
     out=client.chat.completions.create(
         model=MODEL,
@@ -155,7 +207,7 @@ def summarize_with_openai(sections_payload, max_per_section, style):
     try: return json.loads(txt)
     except: print("WARN: KI-JSON fehlgeschlagen:",(txt or "")[:500]); return {"briefing":[],"sections":[]}
 
-# ===== HTML (mit CSS, CH-Datum, sauberer Gliederung) =====
+# ===== HTML =====
 CSS = """
 <style>
 .iguv-weekly{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;color:#111;line-height:1.55;font-size:16px}
@@ -166,6 +218,7 @@ CSS = """
 .iguv-weekly li{margin:.3rem 0}
 .iguv-note{background:#f6f8fb;border-left:4px solid #0f2a5a;padding:.8rem;border-radius:.5rem;margin:.8rem 0 1rem}
 .iguv-disclaimer{font-size:.9rem;color:#555;border-top:1px solid #e6e6e6;padding-top:.6rem;margin-top:1rem}
+.issuer{color:#555}
 </style>
 """
 
@@ -193,16 +246,18 @@ def to_html(digest, days:int)->str:
         parts.append("<ul>")
         for it in items:
             date_iso=(it.get("date_iso") or "").strip()
+            issuer = it.get("issuer","").strip()
             d_txt=""
             if date_iso:
                 try:
                     d=datetime.datetime.strptime(date_iso[:10],"%Y-%m-%d").date()
                     d_txt=f"<strong>{ch_date(d)}</strong> – "
                 except: pass
+            issuer_txt = f' <span class="issuer">({html.escape(issuer)})</span>' if issuer else ""
             t=html.escape(it.get("title","").strip())
             u=html.escape(it.get("url","").strip())
             s=html.escape(it.get("summary","").strip())
-            parts.append(f'<li>{d_txt}<a href="{u}" target="_blank" rel="noopener">{t}</a>. {s}</li>')
+            parts.append(f'<li>{d_txt}<a href="{u}" target="_blank" rel="noopener">{t}</a>{issuer_txt}. {s}</li>')
         parts.append("</ul>")
 
     if not any_item:
