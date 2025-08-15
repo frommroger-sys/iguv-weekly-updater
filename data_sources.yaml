@@ -1,7 +1,6 @@
 # Zeitfenster (Tage)
 time_window_days: 7
 
-# Globale Stilvorgabe für die KI
 summary:
   style: "Nur konkrete Änderungen/Fristen/Sanktionen/Rundschreiben mit unmittelbarer Relevanz für Vermögensverwalter. Keine allgemeinen Beschreibungen, keine Marketing-Sprache."
 
@@ -41,7 +40,7 @@ sections:
         require_date: true
       - url: https://www.finma.ch/de/dokumentation/rundschreiben/
         include_regex:
-          - "^https://www\\.finma\\.ch/.*/dokumentation/rundschreiben/" # RS-Übersichten/Seiten
+          - "^https://www\\.finma\\.ch/.*/dokumentation/rundschreiben/"
         require_date: false
 
   # 2) Aufsichtsorganisationen – Gebühren/Reglement/Prüfung/FAQ
@@ -87,7 +86,7 @@ sections:
         require_date: false
       - url: https://ofac.treasury.gov/recent-actions
         include_regex:
-          - "/recent-actions/"         # nur die Recent-Actions-Seite
+          - "/recent-actions/"        # nur die Recent-Actions-Seite
         require_date: false
       - url: https://www.consilium.europa.eu/en/press/press-releases/
         include_regex:
@@ -137,7 +136,7 @@ sections:
         include_regex: ["/de/aktuelles/","/de/medienmitteilungen/"]
         require_date: true
 
-  # 6) IGUV Events (optional)
+  # 6) IGUV Events
   - name: IGUV Events
     sources:
       - url: https://iguv.ch/event/
