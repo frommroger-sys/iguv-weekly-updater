@@ -14,7 +14,7 @@ jobs:
       TZ: Europe/Zurich
 
       # OpenAI
-      OPENAI_MODEL: gpt-5
+      OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
       USE_OPENAI_WEBSEARCH: "1"
       OPENAI_REQUEST_TIMEOUT_S: "600"
 
