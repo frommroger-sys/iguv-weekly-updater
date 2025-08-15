@@ -2,9 +2,9 @@
 time_window_days: 7
 
 summary:
-  style: "Nur konkrete Änderungen/Fristen/Sanktionen/Rundschreiben mit unmittelbarer Relevanz für Vermögensverwalter. Keine allgemeinen Beschreibungen, keine Marketing-Sprache."
+  style: "Nur konkrete Änderungen/Fristen/Sanktionen/Rundschreiben mit unmittelbarer Relevanz für Vermögensverwalter. Keine allgemeinen Beschreibungen."
 
-# Globale Keywords (Sektionen können sie überschreiben)
+# Globale Keywords (Sektionen können überschreiben)
 keywords:
   - rundschreiben
   - sanktion
@@ -21,18 +21,16 @@ keywords:
   - faq
   - vermögensverwalter
   - vermoegensverwalter
+  - general license
+  - listing
+  - designation
+  - blacklist
 
 sections:
 
   # 1) FINMA – News + Rundschreiben
   - name: FINMA
-    keywords:
-      - rundschreiben
-      - sanktion
-      - verordnung
-      - geldwäscherei
-      - aml
-      - aufsichtsrecht
+    keywords: [rundschreiben, sanktion, verordnung, geldwäscherei, aml, aufsichtsrecht]
     sources:
       - url: https://www.finma.ch/de/news/
         include_regex:
@@ -43,15 +41,9 @@ sections:
           - "^https://www\\.finma\\.ch/.*/dokumentation/rundschreiben/"
         require_date: false
 
-  # 2) Aufsichtsorganisationen – Gebühren/Reglement/Prüfung/FAQ
+  # 2) Aufsichtsorganisationen
   - name: Aufsichtsorganisationen (AOOS, OSFIN, OAD-FCT, OSIF, SO-FIT)
-    keywords:
-      - gebühr
-      - gebuehr
-      - reglement
-      - prüfung
-      - pruefung
-      - faq
+    keywords: [gebühr, gebuehr, reglement, prüfung, pruefung, faq]
     sources:
       - url: https://www.aoos.ch
         include_regex: ["reglement|gebuehr|gebühr|pr(ü|ue)fung|faq"]
@@ -69,40 +61,26 @@ sections:
         include_regex: ["reglement|gebuehr|gebühr|pr(ü|ue)fung|faq"]
         require_date: false
 
-  # 3) Sanktionen / Embargos – SECO / OFAC / EU
+  # 3) Embargos & Sanktionen
   - name: Embargos & Sanktionen (SECO / OFAC / EU)
-    keywords:
-      - sanktion
-      - embargo
-      - restriktive massnahmen
-      - restriktive maßnahmen
-      - sdn
-      - gelistete personen
-      - verordnung
+    keywords: [sanktion, embargo, sdn, general license, listing, designation, verordnung]
     sources:
       - url: https://www.seco.admin.ch/seco/de/home/Aussenwirtschaftspolitik_Wirtschaftliche_Zusammenarbeit/Wirtschaftsbeziehungen/exportkontrollen-und-sanktionen/sanktionen-embargos.html
         include_regex:
-          - "sanktions|embargo|ukraine|russ|iran|syr|belarus|nordkorea|north-korea|irak|moldau|sudan|libanon|lebanon"
+          - "sanktions|embargo|ukraine|russ|iran|syr|belarus|nordkorea|north-korea|irak|moldau|sudan|libanon|congo|kongo"
         require_date: false
       - url: https://ofac.treasury.gov/recent-actions
         include_regex:
-          - "/recent-actions/"        # nur die Recent-Actions-Seite
+          - "/recent-actions/"
         require_date: false
       - url: https://www.consilium.europa.eu/en/press/press-releases/
         include_regex:
-          - "/press/press-releases/20\\d{2}/\\d{2}/"  # datierte EU-PMs
+          - "/press/press-releases/20\\d{2}/\\d{2}/"
         require_date: true
 
   # 4) Branchenstimmung / Verbände
   - name: Branchenstimmung (economiesuisse, SwissBanking, VSV-ASG)
-    keywords:
-      - wirtschaft
-      - banken
-      - regulation
-      - regulierung
-      - finanzplatz
-      - sanktion
-      - aml
+    keywords: [wirtschaft, banken, regulation, regulierung, finanzplatz, sanktion, aml]
     sources:
       - url: https://www.economiesuisse.ch/de/medien
         include_regex: ["/medien/","/aktuell/","/artikel/"]
@@ -114,17 +92,9 @@ sections:
         include_regex: ["/de/aktuelles/","/de/medienmitteilungen/"]
         require_date: true
 
-  # 5) Medien-Monitoring – Publikationen/Erwähnungen IGUV / InPaSU / VSV-ASG
-  - name: Medien-Monitoring (IGUV / InPaSU / VSV-ASG)
-    keywords:
-      - iguv
-      - inpasu
-      - vsv
-      - asg
-      - medien
-      - interview
-      - publikation
-      - zitiert
+  # 5) Medien-Monitoring
+  - name: Medien-Monitoring (IGUV / InPaSU / VSV-ASG + Medien)
+    keywords: [iguv, inpasu, vsv, asg, interview, publikation, zitiert, studie, sanktion, rundschreiben]
     sources:
       - url: https://iguv.ch/news/
         include_regex: ["/news/","/magazin/","/aktuell/"]
@@ -135,8 +105,18 @@ sections:
       - url: https://www.vsv-asg.ch/de/aktuelles
         include_regex: ["/de/aktuelles/","/de/medienmitteilungen/"]
         require_date: true
+      # Öffentliche Medienportale (nur datierte Artikel/PMs)
+      - url: https://www.finews.ch/
+        include_regex: ["/news/\\d{4}/\\d{2}/","/media/\\d{4}/\\d{2}/"]
+        require_date: true
+      - url: https://www.handelszeitung.ch/
+        include_regex: ["/\\d{4}/\\d{2}/"]
+        require_date: true
+      - url: https://www.nzz.ch/themen/wirtschaft
+        include_regex: ["/\\d{4}-\\d{2}-\\d{2}/"]
+        require_date: true
 
-  # 6) IGUV Events
+  # 6) IGUV Events (nächste 3 werden separat geparst)
   - name: IGUV Events
     sources:
       - url: https://iguv.ch/event/
