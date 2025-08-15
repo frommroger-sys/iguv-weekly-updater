@@ -21,15 +21,15 @@ WP_APP_PASSWORD  = os.environ.get("WP_APP_PASSWORD", "")
 
 TZ               = os.environ.get("TZ", "Europe/Zurich")
 
-# Limits & Timeouts (Safe Defaults)
+# Limits & Timeouts
 HTTP_TIMEOUT_S             = int(os.environ.get("HTTP_TIMEOUT_S", "25"))
 HTTP_MAX_RETRIES           = int(os.environ.get("HTTP_MAX_RETRIES", "2"))
-MAX_LINKS_PER_SOURCE       = int(os.environ.get("MAX_LINKS_PER_SOURCE", "40"))
-MAX_TOTAL_CANDIDATES       = int(os.environ.get("MAX_TOTAL_CANDIDATES", "150"))
+MAX_LINKS_PER_SOURCE       = int(os.environ.get("MAX_LINKS_PER_SOURCE", "60"))
+MAX_TOTAL_CANDIDATES       = int(os.environ.get("MAX_TOTAL_CANDIDATES", "200"))
 MAX_ITEMS_PER_SECTION_KI   = int(os.environ.get("MAX_ITEMS_PER_SECTION_KI", "5"))
 OPENAI_REQUEST_TIMEOUT_S   = int(os.environ.get("OPENAI_REQUEST_TIMEOUT_S", "60"))
 
-USER_AGENT = "Mozilla/5.0 (compatible; IGUV-Weekly-Updater/3.1; +https://iguv.ch)"
+USER_AGENT = "Mozilla/5.0 (compatible; IGUV-Weekly-Updater/3.2; +https://iguv.ch)"
 HDR_HTML = {
     "User-Agent": USER_AGENT,
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -48,10 +48,8 @@ def iso_now_local(fmt="%Y-%m-%d %H:%M") -> str:
     return datetime.datetime.now(tz=gettz(TZ)).strftime(fmt)
 
 def domain(url: str) -> str:
-    try:
-        return urlparse(url).netloc
-    except Exception:
-        return ""
+    try: return urlparse(url).netloc
+    except: return ""
 
 def load_yaml(path: str) -> dict:
     with open(path, "r", encoding="utf-8") as f:
@@ -65,8 +63,7 @@ def require_env():
         "WP_USERNAME": WP_USERNAME,
         "WP_APP_PASSWORD": WP_APP_PASSWORD,
     }.items():
-        if not v:
-            missing.append(k)
+        if not v: missing.append(k)
     if missing:
         raise RuntimeError("Fehlende ENV Variablen: " + ", ".join(missing))
 
@@ -79,7 +76,7 @@ def http_get(url: str) -> requests.Response:
             last_err = e
     raise last_err
 
-# Datumsheuristiken
+# Datums-Heuristik (URL/Titel)
 DATE_PATTERNS = [
     r"(?P<iso>\d{4}-\d{2}-\d{2})",
     r"(?P<dot>\d{2}\.\d{2}\.\d{4})",
@@ -90,87 +87,95 @@ def parse_date_heuristic(text_or_url: str):
     s = text_or_url or ""
     for pat in DATE_PATTERNS:
         m = re.search(pat, s)
-        if not m:
-            continue
+        if not m: continue
         if m.groupdict().get("iso"):
-            try:
-                return datetime.datetime.strptime(m.group("iso"), "%Y-%m-%d").date()
-            except Exception:
-                pass
+            try: return datetime.datetime.strptime(m.group("iso"), "%Y-%m-%d").date()
+            except: pass
         if m.groupdict().get("dot"):
-            try:
-                return datetime.datetime.strptime(m.group("dot"), "%d.%m.%Y").date()
-            except Exception:
-                pass
+            try: return datetime.datetime.strptime(m.group("dot"), "%d.%m.%Y").date()
+            except: pass
         if m.groupdict().get("y") and m.groupdict().get("m"):
-            try:
-                y = int(m.group("y")); mo = int(m.group("m"))
-                return datetime.date(y, mo, 1)
-            except Exception:
-                pass
+            try: return datetime.date(int(m.group("y")), int(m.group("m")), 1)
+            except: pass
     return None
 
 def is_within_days(d: datetime.date, days: int) -> bool:
-    if not d: return False
-    today = datetime.date.today()
-    return (today - d) <= datetime.timedelta(days=days)
+    return bool(d) and (datetime.date.today() - d) <= datetime.timedelta(days=days)
 
-def same_site(href: str, base: str) -> bool:
-    try:
-        return domain(href) == domain(base)
-    except Exception:
-        return False
+# Navigation/irrelevante Linktexte (kleingeschrieben vergleichen)
+TEXT_BLACKLIST = {
+    "home","start","startseite","über uns","ueber uns","about","kontakt","kontaktieren",
+    "jobs","karriere","login","anmelden","impressum","datenschutz","media","medien","news",
+    "newsletter","presse","faq","häufige fragen","haeufige fragen","downloads","publikationen",
+    "veranstaltungen","events","kalender","sitemap"
+}
+
+def normalize(s: str) -> str:
+    return " ".join((s or "").strip().split())
 
 # =========================
-#   Crawling / Filtering
+#   Crawling / Filtering (mit Source-Regeln)
 # =========================
-def extract_candidates(list_url: str, days: int, keywords: list[str]) -> list[dict]:
-    """Scannt eine Listen-/Übersichtsseite, filtert nach Keywords + Datumsheuristik und deckelt die Anzahl."""
+def extract_from_source(list_url: str, rule: dict, days: int, global_keywords: list[str]) -> list[dict]:
+    """
+    rule:
+      include_regex: [list]
+      exclude_text: [list]
+      require_date: true/false
+      same_site_only: true/false
+      keywords: [list]   # optional, überschreibt global
+    """
     print(f" - Quelle abrufen: {list_url}")
     try:
         resp = http_get(list_url)
     except Exception as e:
-        print("   WARN: fetch failed:", repr(e))
-        return []
+        print("   WARN: fetch failed:", repr(e)); return []
     if resp.status_code != 200:
-        print("   WARN: HTTP", resp.status_code, "bei", list_url)
-        return []
+        print("   WARN: HTTP", resp.status_code, "bei", list_url); return []
 
     soup = BeautifulSoup(resp.text, "lxml")
-    kws = [k.lower() for k in keywords]
+    include_regex = [re.compile(pat, flags=re.I) for pat in rule.get("include_regex", [])]
+    exclude_text = [t.lower() for t in rule.get("exclude_text", [])]
+    require_date = bool(rule.get("require_date", True))
+    same_site_only = rule.get("same_site_only", True)
+    kws = [k.lower() for k in (rule.get("keywords") or global_keywords or [])]
+
+    items = []
     base = list_url
-    out = []
-
     for i, a in enumerate(soup.find_all("a", href=True)):
-        if i >= MAX_LINKS_PER_SOURCE:
-            break
+        if i >= MAX_LINKS_PER_SOURCE: break
+
         href = urljoin(base, a["href"].strip())
-        text = " ".join(a.get_text(separator=" ", strip=True).split())
-        if not text:
+        text = normalize(a.get_text(" ", strip=True))
+
+        if not text or text.lower() in TEXT_BLACKLIST: 
             continue
-        if not same_site(href, base):
+        if same_site_only and domain(href) != domain(base):
+            continue
+        if include_regex:
+            if not any(rx.search(href) or rx.search(text) for rx in include_regex):
+                continue
+        if exclude_text and any(ex in text.lower() for ex in exclude_text):
             continue
 
+        # Keywords (wenn gesetzt)
         blob = (text + " " + href).lower()
         if kws and not any(k in blob for k in kws):
             continue
 
         d = parse_date_heuristic(text) or parse_date_heuristic(href)
+        if require_date and not d:
+            continue
         if d and not is_within_days(d, days):
             continue
 
-        out.append({
+        items.append({
             "title": text[:240],
             "url": href,
             "date": d.isoformat() if d else None,
             "source": domain(href)
         })
 
-    # Dedup (Titel+URL)
-    dedup = {}
-    for it in out:
-        dedup[(it["title"], it["url"])] = it
-    items = list(dedup.values())
     print(f"   -> {len(items)} Kandidaten nach Filter (max {MAX_LINKS_PER_SOURCE} Links gescannt)")
     return items
 
@@ -178,70 +183,66 @@ def extract_candidates(list_url: str, days: int, keywords: list[str]) -> list[di
 #   OpenAI Summarization
 # =========================
 def summarize_with_openai(sections_payload: list[dict], max_per_section: int, style: str) -> dict:
-    """JSON-Ausgabe via Chat Completions (stabil mit openai>=1.35)."""
     client = OpenAI(api_key=OPENAI_API_KEY, timeout=OPENAI_REQUEST_TIMEOUT_S)
 
-    # Payload deckeln
-    capped_sections = []
-    total = 0
+    # Deckeln
+    capped, total = [], 0
     for sec in sections_payload:
-        cand = sec.get("candidates", [])[:50]
-        capped_sections.append({"name": sec.get("name", "Sektion"), "candidates": cand})
+        cand = sec.get("candidates", [])[:60]
+        capped.append({"name": sec.get("name","Sektion"), "candidates": cand})
         total += len(cand)
-        if total >= MAX_TOTAL_CANDIDATES:
-            break
+        if total >= MAX_TOTAL_CANDIDATES: break
 
     sys_prompt = (
         "Du bist ein präziser Nachrichten-Editor für Finanz-/Regulierungsthemen in der Schweiz. "
         f"Erstelle pro Sektion maximal {max_per_section} Punkte. "
-        "Jeder Punkt: title, url, date_iso (YYYY-MM-DD; wenn None → heutiges Datum), summary (1–2 Sätze). "
+        "Jeder Punkt: title, url, date_iso (YYYY-MM-DD; wenn nicht vorhanden → leer lassen), summary (1–2 Sätze). "
         "Gib das Ergebnis als JSON-Objekt {\"sections\":[{\"name\":\"...\",\"items\":[...]}]} zurück."
     )
 
     user_payload = {
         "generated_at": iso_now_local(),
         "style": style,
-        "sections": capped_sections,
-        "note": f"KI sieht max. {MAX_TOTAL_CANDIDATES} Kandidaten insgesamt; pro Sektion max. 50."
+        "sections": capped,
+        "note": f"Insgesamt max. {MAX_TOTAL_CANDIDATES} Kandidaten."
     }
 
     completion = client.chat.completions.create(
         model=MODEL,
         response_format={"type": "json_object"},
         messages=[
-            {"role": "system", "content": sys_prompt},
-            {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)}
+            {"role":"system","content":sys_prompt},
+            {"role":"user","content":json.dumps(user_payload, ensure_ascii=False)}
         ],
         temperature=0.2
     )
 
     txt = completion.choices[0].message.content
     try:
-        data = json.loads(txt)
+        return json.loads(txt)
     except Exception:
         print("WARN: KI-Output kein JSON. Rohtext (Anfang):", (txt or "")[:600])
-        data = {"sections": []}
-    return data
+        return {"sections":[]}
 
 # =========================
-#   HTML-Rendering
+#   HTML Rendering
 # =========================
 def to_html(digest: dict, days: int) -> str:
     parts = [f'<h2>Wöchentliche Übersicht (aktualisiert: {iso_now_local()})</h2>']
     any_item = False
     for sec in digest.get("sections", []):
         items = sec.get("items", []) or []
-        if not items:
-            continue
+        if not items: continue
         any_item = True
         parts.append(f'<h3 style="margin-top:1.2em;">{sec.get("name","")}</h3>')
         parts.append("<ul>")
         for it in items:
-            date = (it.get("date_iso") or "")[:10]
+            date = (it.get("date_iso") or "").strip()
+            date_html = f"<strong>{date}</strong> – " if date else ""
             title = it.get("title","").strip()
             url = it.get("url","").strip()
             summary = it.get("summary","").strip()
-            parts.append(f'<li><strong>{date}</strong> – <a href="{url}" target="_blank" rel="noopener">{title}</a>: {summary}</li>')
+            parts.append(f'<li>{date_html}<a href="{url}" target="_blank" rel="noopener">{title}</a>: {summary}</li>')
         parts.append("</ul>")
     if not any_item:
         parts.append("<p>Keine relevanten Neuigkeiten in den letzten Tagen.</p>")
@@ -274,68 +275,67 @@ def main():
     cfg = load_yaml("data_sources.yaml")
 
     parser = argparse.ArgumentParser(description="IGUV Weekly Updater")
-    parser.add_argument("--fast", action="store_true", help="Nur Kernquellen (FINMA, SECO, OFAC) – schneller, weniger Last.")
+    parser.add_argument("--fast", action="store_true", help="Nur Kernquellen (FINMA, SECO, OFAC)")
     args = parser.parse_args()
 
-    # Quellen bestimmen (ggf. FAST-Modus)
     sections_cfg = cfg.get("sections", [])
     if args.fast:
-        core_domains = {"finma.ch", "seco.admin.ch", "ofac.treasury.gov"}
-        filtered_sections = []
+        core_domains = {"finma.ch","seco.admin.ch","ofac.treasury.gov"}
+        fast_sections = []
         for sec in sections_cfg:
-            kept = []
-            for u in sec.get("sources", []):
-                try:
-                    if any(d in domain(u) for d in core_domains):
-                        kept.append(u)
-                except Exception:
-                    pass
-            if kept:
-                filtered_sections.append({"name": sec["name"], "sources": kept})
-        sections_cfg = filtered_sections
+            rules = []
+            for src in sec.get("sources", []):
+                u = src["url"] if isinstance(src, dict) else src
+                if any(d in domain(u) for d in core_domains):
+                    rules.append(src)
+            if rules:
+                fast_sections.append({"name":sec["name"], "sources": rules, "keywords": sec.get("keywords")})
+        sections_cfg = fast_sections
         print(f"FAST-Modus aktiv: {len(sections_cfg)} Sektionen / Kernquellen.")
 
     days = int(cfg.get("time_window_days", 7))
-    keywords = cfg.get("keywords", [])
+    global_keywords = [k.lower() for k in (cfg.get("keywords") or [])]
     style = cfg.get("summary", {}).get("style", "Kompakt, sachlich.")
 
     # Crawlen
     print("Quellen scannen …")
     sections_payload = []
-    total_candidates = 0
+    total = 0
     for block in sections_cfg:
         name = block.get("name", "Sektion")
-        urls = block.get("sources", [])
-        all_items = []
-        for u in urls:
-            if total_candidates >= MAX_TOTAL_CANDIDATES:
-                break
-            items = extract_candidates(u, days=days, keywords=keywords)
-            room = MAX_TOTAL_CANDIDATES - total_candidates
-            if room <= 0:
-                break
+        per_section_keywords = [k.lower() for k in (block.get("keywords") or [])] or global_keywords
+        cand_all = []
+        for src in block.get("sources", []):
+            if total >= MAX_TOTAL_CANDIDATES: break
+            if isinstance(src, str):
+                rule = {"url": src}
+            else:
+                rule = dict(src)
+            url = rule.get("url"); 
+            if not url: continue
+            items = extract_from_source(url, rule, days, per_section_keywords)
+            room = MAX_TOTAL_CANDIDATES - total
             items = items[:room]
-            total_candidates += len(items)
-            all_items.extend(items)
-        all_items.sort(key=lambda it: it.get("date") or "", reverse=True)
-        sections_payload.append({"name": name, "candidates": all_items})
+            total += len(items)
+            cand_all.extend(items)
+        cand_all.sort(key=lambda it: it.get("date") or "", reverse=True)
+        sections_payload.append({"name": name, "candidates": cand_all})
 
-    print(f"Gesamt-Kandidaten (gekappt): {total_candidates} / Limit {MAX_TOTAL_CANDIDATES}")
+    print(f"Gesamt-Kandidaten (gekappt): {total} / Limit {MAX_TOTAL_CANDIDATES}")
 
     # KI
     print("KI-Zusammenfassung …")
-    digest = summarize_with_openai(sections_payload, max_per_section=MAX_ITEMS_PER_SECTION_KI, style=style)
+    digest = summarize_with_openai(sections_payload, MAX_ITEMS_PER_SECTION_KI, style)
     total_items = sum(len(s.get("items", [])) for s in digest.get("sections", []))
     print(f"Relevante Meldungen nach KI: {total_items}")
 
     # HTML
     print("HTML generieren …")
-    html_inner = to_html(digest, days=days)
+    html_inner = to_html(digest, days)
 
-    # WP via MU-Plugin
+    # WP
     print("WordPress aktualisieren …")
     post_to_mu_plugin(html_inner)
-
     print("== Fertig ==")
 
 if __name__ == "__main__":
