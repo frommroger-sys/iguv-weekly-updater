@@ -19,7 +19,7 @@ from bs4 import BeautifulSoup
 # ================== ENV ==================
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_MODEL   = (os.getenv("OPENAI_MODEL", "") or "gpt-5").strip()
-OPENAI_REQUEST_TIMEOUT_S = int(os.getenv("OPENAI_REQUEST_TIMEOUT_S", "900"))
+OPENAI_REQUEST_TIMEOUT_S = int(os.getenv("OPENAI_REQUEST_TIMEOUT_S", "300"))
 USE_WEBSEARCH  = os.getenv("USE_OPENAI_WEBSEARCH", "1").lower() not in ("0","false","off")
 
 WP_BASE         = (os.getenv("WP_BASE", "") or "").rstrip("/")
