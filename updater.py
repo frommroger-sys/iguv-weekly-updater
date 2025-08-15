@@ -40,11 +40,11 @@ def now_local():
 def ch_date(d: datetime.date) -> str:
     return d.strftime("%d.%m.%Y")
 
-def domain(u): 
+def domain(u):
     try: return urlparse(u).netloc
     except: return ""
 
-def load_yaml(p): 
+def load_yaml(p):
     with open(p,"r",encoding="utf-8") as f: return yaml.safe_load(f)
 
 def require_env():
@@ -62,7 +62,7 @@ DATE_PATTERNS=[r"(?P<iso>\d{4}-\d{2}-\d{2})", r"(?P<dot>\d{2}\.\d{2}\.\d{4})", r
 def parse_date_heuristic(s):
     s=s or ""
     for pat in DATE_PATTERNS:
-        m=re.search(pat,s); 
+        m=re.search(pat,s)
         if not m: continue
         if m.groupdict().get("iso"):
             try: return datetime.datetime.strptime(m.group("iso"),"%Y-%m-%d").date()
@@ -78,9 +78,11 @@ def parse_date_heuristic(s):
 def within_days(d,days): return bool(d) and (datetime.date.today()-d)<=datetime.timedelta(days=days)
 def norm(s): return " ".join((s or "").split())
 
-TEXT_BLACKLIST={"home","start","startseite","über uns","ueber uns","about","kontakt","kontaktieren","jobs","karriere","login","anmelden",
-                "impressum","datenschutz","newsletter","faq","häufige fragen","haeufige fragen","downloads","publikationen","veranstaltungen",
-                "events","kalender","sitemap","kontaktformular","media","medien","news"}  # Navigation
+TEXT_BLACKLIST={
+    "home","start","startseite","über uns","ueber uns","about","kontakt","kontaktieren","jobs","karriere","login","anmelden",
+    "impressum","datenschutz","newsletter","faq","häufige fragen","haeufige fragen","downloads","publikationen","veranstaltungen",
+    "events","kalender","sitemap","kontaktformular","media","medien","news"
+}  # Navigation
 
 # ===== Deep snippet (zur Kontextverbesserung) =====
 def extract_snippet(u,max_chars=350):
@@ -152,17 +154,17 @@ def try_openai_websearch_enrich(payload: dict) -> dict:
             '"briefing":[{"title":"..","url":".."}],'
             '"sections":[{"name":"..","items":[{"title":"..","url":"..","date_iso":"YYYY-MM-DD|","issuer":"..","summary":".."}]}]}'
         )
-        # Responses API mit tools=[web_search] (verfügbar, falls für Account freigeschaltet)
+        # Responses API mit tools=[web_search]; wenn nicht verfügbar → Exception → Fallback
         resp = client.responses.create(
             model=MODEL,
             input=[{"role":"system","content":instructions},
                    {"role":"user","content":json.dumps(payload, ensure_ascii=False)}],
             tools=[{"type":"web_search"}],
-            response_format={"type":"json_object"},
-            temperature=0.15,
+            # response_format nicht überall unterstützt → weglassen und später parsen
+            # temperature beim Responses-Endpoint nicht setzen
         )
-        txt = resp.output_text
-        return json.loads(txt)
+        txt = getattr(resp, "output_text", None) or (resp.output[0].content[0].text.value if getattr(resp, "output", None) else "")
+        return json.loads(txt) if txt else {}
     except Exception as e:
         print("Websearch nicht genutzt (Fallback):", repr(e))
         return {}
@@ -196,13 +198,19 @@ def summarize_with_openai(sections_payload, max_per_section, style):
         if enriched.get("sections") or enriched.get("briefing"):
             return enriched
 
-    out=client.chat.completions.create(
-        model=MODEL,
-        response_format={"type":"json_object"},
-        messages=[{"role":"system","content":sys_prompt},
-                  {"role":"user","content":json.dumps(user_payload,ensure_ascii=False)}],
-        temperature=0.15
-    )
+    # Chat Completions – bei GPT-5 KEINE temperature senden
+    params = {
+        "model": MODEL,
+        "response_format": {"type":"json_object"},
+        "messages": [
+            {"role":"system","content":sys_prompt},
+            {"role":"user","content":json.dumps(user_payload,ensure_ascii=False)}
+        ],
+    }
+    if not MODEL.startswith("gpt-5"):
+        params["temperature"] = 0.15
+
+    out=client.chat.completions.create(**params)
     txt=out.choices[0].message.content
     try: return json.loads(txt)
     except: print("WARN: KI-JSON fehlgeschlagen:",(txt or "")[:500]); return {"briefing":[],"sections":[]}
@@ -314,7 +322,7 @@ def main():
         for src in block.get("sources",[]):
             if total>=MAX_TOTAL_CANDIDATES: break
             rule=dict(url=src) if isinstance(src,str) else dict(src)
-            url=rule.get("url"); 
+            url=rule.get("url")
             if not url: continue
             items=extract_from_source(url, rule, days, per_kws)
             room=MAX_TOTAL_CANDIDATES-total
