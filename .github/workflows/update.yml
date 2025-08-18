@@ -16,7 +16,7 @@ jobs:
       # OpenAI
       OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
       USE_OPENAI_WEBSEARCH: "1"
-      OPENAI_REQUEST_TIMEOUT_S: "900"
+      OPENAI_REQUEST_TIMEOUT_S: "600"
 
       # WP / Endpoint
       WP_BASE: ${{ secrets.WP_BASE }}
